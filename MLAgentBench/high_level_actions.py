@@ -83,23 +83,15 @@ def understand_file( file_name, things_to_look_for, work_dir = ".", **kwargs):
 
 EDIT_SCRIPT_MODEL = "claude-v1"
 EDIT_SCRIPT_MAX_TOKENS = 4000
-def _script_datasets(objective, root, script_name):
+def _script_datasets(inputs, root, script_name):
     """Resolve selected entry names and build loading code before generation."""
-    declarations = list(re.finditer(r"\bDATASETS\s*:", objective))
-    if len(declarations) != 1:
-        raise EnvException('Include exactly one DATASETS: {"alias": "entry.csv"} declaration in objective; use DATASETS: {} for no inputs')
-    try:
-        # Decode just the mapping, allowing prose after it and multiline JSON.
-        inputs, _ = json.JSONDecoder().raw_decode(objective[declarations[0].end():].lstrip())
-    except json.JSONDecodeError as exc:
-        raise EnvException(f"DATASETS must be valid JSON: {exc}") from exc
     if not isinstance(inputs, dict):
-        raise EnvException("DATASETS must be a JSON object mapping aliases to file entry names")
+        raise EnvException('datasets must be a JSON object mapping aliases to file entry names; use {} for no inputs')
     context = []
     resolved_inputs = {}
     for alias, path in inputs.items():
         if not isinstance(alias, str) or not alias or not isinstance(path, str) or not path:
-            raise EnvException("DATASETS must map nonempty aliases to file entry names")
+            raise EnvException("datasets must map nonempty string aliases to nonempty string file entry names")
         # ls -F can append classification markers. Preserve a literal matching
         # name first; otherwise remove a file marker for resolution.
         if os.path.basename(path) == path:
@@ -167,7 +159,7 @@ for _alias, _relative in _DATASET_INPUTS.items():
     return json.dumps(context, indent=2), loader
 
 
-def create_script(objective, script_name, work_dir=".", research_problem="", **kwargs):
+def create_script(datasets, objective, script_name, work_dir=".", research_problem="", **kwargs):
     """Generate a new Python script without executing or replacing a file."""
     if not isinstance(objective, str) or not objective.strip():
         raise EnvException("objective must be a nonempty descriptive string")
@@ -188,7 +180,7 @@ def create_script(objective, script_name, work_dir=".", research_problem="", **k
         raise EnvException(f"cannot write file {script_name} because it is a read-only file")
     if not os.path.isdir(os.path.dirname(destination)):
         raise EnvException("The script's parent directory must already exist")
-    dataset_context, dataset_loader = _script_datasets(objective, root, script_name)
+    dataset_context, dataset_loader = _script_datasets(datasets, root, script_name)
 
     prompt = f"""Continue a Python script named {script_name} after the supplied loading block.
 Execution libraries:
@@ -415,15 +407,16 @@ HIGH_LEVEL_ACTIONS =[
     ),
     ActionInfo(
         name="Create Script (AI)",
-        description='Create a new Python script from scratch. Use List Files or startup metadata to select dataset entry names, then include one DATASETS: {"train": "train.csv", "items": "item_master.csv"} declaration in the objective (or DATASETS: {} for no inputs). Prose may precede or follow the mapping on the same line, and the mapping may span lines. The system resolves each entry within the workspace, reads actual headers, constructs loading code, and asks the coding LLM to continue after that code using DATASETS["train"], etc. The coder has no tools or prior conversation and does not write the input loading. Missing or ambiguous names fail; if ambiguous, retry with one relative path from the error. Supported inputs are UTF-8 CSV/TSV with headers and JSON. Explicitly state each file role, target, joins, split/date restrictions, dtype requirements and desired outputs. Do not select hidden labels or files this script must not read. Other formats require a separate loading script. The generated script is saved but not executed; existing files are not overwritten.' + r'''
+        description='''Create a new Python script from the selected datasets. Pass datasets as a JSON object mapping aliases to workspace filenames, not as text inside objective. Use {} for no inputs. The tool resolves files, reads actual headers, and supplies loading code; the coding LLM continues using DATASETS["alias"]. CSV/TSV inputs are pandas DataFrames and JSON inputs are decoded values. The coder has no tools or prior conversation. In objective, state file roles, target, joins, split/date restrictions, dtype requirements, and outputs. Select only files safe for this computation. Missing or ambiguous names fail; use one listed relative path when ambiguous. Supported formats are UTF-8 CSV, TSV, and JSON. The script is saved but not executed, and existing files are not overwritten.
 
-Exact response format example (emit plain labels and a JSON object, without Markdown bullets, bold labels, or quotes around the whole object):
+Exact response format example (plain labels, no Markdown bullets or quotes around the object):
 Action: Create Script (AI)
-Action Input: {"objective": "Create a last-observed-sales baseline. DATASETS: {\"train\": \"train.csv\", \"validation\": \"validation.csv\", \"test\": \"test.csv\"}. Use train only to predict validation and calculate WMAPE. Then use train plus validation to predict test. Save submission.csv with columns sku, store, week, sales_units.", "script_name": "baseline_forecast.py"}
-Escape each dataset quote with exactly one backslash in the outer objective JSON string, as shown. Do not double-escape it. After decoding Action Input once, the objective must contain DATASETS: {"train": "train.csv", "validation": "validation.csv", "test": "test.csv"}, with no backslashes before its quotes.
+Action Input: {"datasets": {"train": "train.csv", "validation": "validation.csv", "test": "test.csv"}, "objective": "Create a last-observed-sales baseline. Evaluate validation WMAPE using train only. Then use train plus validation to predict test. Save submission.csv with columns sku, store, week, sales_units.", "script_name": "baseline_forecast.py"}
+Do not embed a DATASETS declaration inside objective. End your response immediately after the closing brace of Action Input; do not emit Observation:.
 ''',
         usage={
-            "objective": 'Detailed objective, file roles, outputs and constraints, plus one JSON mapping of aliases to entry names: DATASETS: {"train": "train.csv"}. Instructions may follow on the same line; multiline JSON is also accepted. Use DATASETS: {} when no dataset is needed.',
+            "datasets": 'A JSON object mapping aliases to workspace filenames, for example {"train": "train.csv", "items": "item_master.csv"}. Use {} for no inputs.',
+            "objective": "Plain-text instructions describing file roles, computations, leakage constraints, and outputs. The script receives loaded inputs as DATASETS[alias].",
             "script_name": "a new Python script name ending in .py, relative to the working directory; its parent directory must exist"
         },
         return_value="The observation contains the saved script and its name. Invalid Python, invalid paths, read-only destinations, and existing files produce an error. Inspect the script before using Execute Script.",

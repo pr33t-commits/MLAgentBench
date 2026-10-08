@@ -43,7 +43,7 @@ class CreateScriptTests(unittest.TestCase):
         self.trace = self.schema.Trace([], [], {}, "test")
 
     def create(self, **overrides):
-        args = dict(objective="Create a forecasting script\nDATASETS: {}", script_name="train.py",
+        args = dict(datasets={}, objective="Create a forecasting script", script_name="train.py",
                     work_dir=str(self.root), research_problem="Demand forecasting",
                     read_only_files=[], log_file="test.log", trace=self.trace)
         args.update(overrides)
@@ -85,7 +85,7 @@ class CreateScriptTests(unittest.TestCase):
 
     def test_registered_action_creates_and_records_without_execution(self):
         action = next(a for a in self.actions.HIGH_LEVEL_ACTIONS if a.name == "Create Script (AI)")
-        self.assertEqual(set(action.usage), {"objective", "script_name"})
+        self.assertEqual(set(action.usage), {"datasets", "objective", "script_name"})
         self.assertIs(action.function, self.actions.create_script)
         self.assertIn("Created train.py", self.create(library_context="sklearn available, version TEST"))
         self.assertIn("raise RuntimeError", (self.root / "train.py").read_text())
@@ -124,12 +124,12 @@ class CreateScriptTests(unittest.TestCase):
 
     def test_dataset_contract_errors_precede_model_call(self):
         (self.root / "data.bin").write_bytes(b"abc")
-        for declaration in ["", 'DATASETS: {"train": "missing.csv"}',
-                            'DATASETS: {"train": "../outside.csv"}',
-                            'DATASETS: {"train": "data.bin"}',
-                            'DATASETS: {"train": 1}', 'DATASETS: {bad}']:
-            with self.subTest(declaration=declaration), self.assertRaises(self.schema.EnvException):
-                self.create(objective="Read training data\n" + declaration)
+        for datasets in [None, [], "", '{"train": "sales.csv"}',
+                         {"train": "missing.csv"}, {"train": "../outside.csv"},
+                         {"train": "data.bin"}, {"train": 1}, {"": "sales.csv"},
+                         {1: "sales.csv"}, {"train": ""}]:
+            with self.subTest(datasets=datasets), self.assertRaises(self.schema.EnvException):
+                self.create(datasets=datasets)
         self.actions.complete_text.assert_not_called()
         self.assertFalse((self.root / "train.py").exists())
 
@@ -147,7 +147,7 @@ assert DATASETS["items"].category.iloc[0] == "cat_a"
 assert DATASETS["config"]["horizon"] == 13
 print("loaded real inputs")
 ```'''
-        self.create(script_name="scripts/load.py", objective='Check inputs\nDATASETS: {"sales": "sales.csv", "items": "items.tsv", "config": "config.json"}')
+        self.create(script_name="scripts/load.py", objective='Check inputs', datasets={"sales": "sales.csv", "items": "items.tsv", "config": "config.json"})
         prompt = self.actions.complete_text.call_args.args[0]
         self.assertIn('"sales_units"', prompt)
         self.assertIn('"category"', prompt)
@@ -167,36 +167,34 @@ print("loaded real inputs")
             (self.root / name).mkdir()
             (self.root / name / "sales.csv").write_text("sales_units\n5\n")
         with self.assertRaisesRegex(self.schema.EnvException, "exactly one"):
-            self.create(objective='Read sales\nDATASETS: {"sales": "sales.csv"}')
+            self.create(objective='Read sales', datasets={"sales": "sales.csv"})
         self.actions.complete_text.assert_not_called()
-        self.create(objective='Read sales\nDATASETS: {"sales": "first/sales.csv"}')
+        self.create(objective='Read sales', datasets={"sales": "first/sales.csv"})
         self.assertIn("first", (self.root / "train.py").read_text())
 
     def test_list_files_classification_marker(self):
         (self.root / "sales.csv").write_text("sales_units\n5\n")
-        self.create(objective='Read sales\nDATASETS: {"sales": "sales.csv*"}')
+        self.create(objective='Read sales', datasets={"sales": "sales.csv*"})
         self.assertIn("'sales': 'sales.csv'", (self.root / "train.py").read_text())
 
-    def test_dataset_mapping_with_inline_prose_and_multiline_json(self):
-        (self.root / "train.csv").write_text("sales_units\n5\n")
-        (self.root / "validation.csv").write_text("sales_units\n6\n")
-        objectives = [
-            'DATASETS: {"train": "train.csv", "validation": "validation.csv"} Perform exploratory data analysis (EDA) on train.csv and validation.csv to understand sales distribution, seasonality, zero-demand frequency, and data completeness. Generate summary statistics and plots to visualize sales trends over time, per SKU, and per store.',
-            'Perform EDA. DATASETS: {\n"train": "train.csv",\n"validation": "validation.csv"\n}\nSave plots.',
-        ]
-        for index, objective in enumerate(objectives):
-            with self.subTest(objective=objective):
-                self.create(objective=objective, script_name=f"eda_{index}.py")
-                content = (self.root / f"eda_{index}.py").read_text()
-                self.assertIn("'train': 'train.csv'", content)
-                self.assertIn("'validation': 'validation.csv'", content)
-                self.assertIn(objective, self.actions.complete_text.call_args.args[0])
+    def test_tool_example_parses_and_creates_with_structured_datasets(self):
+        from test_action_input import Agent
+        action = next(a for a in self.actions.HIGH_LEVEL_ACTIONS if a.name == "Create Script (AI)")
+        raw = action.description.split("Action Input: ", 1)[1].splitlines()[0]
+        parsed = Agent.parse_action_input(raw, action)
+        self.assertIsInstance(parsed["datasets"], dict)
+        self.assertNotIn("DATASETS:", parsed["objective"])
+        for name in parsed["datasets"].values():
+            (self.root / name).write_text("sales_units\n5\n")
+        self.create(**parsed)
+        content = (self.root / parsed["script_name"]).read_text()
+        self.assertIn("'train': 'train.csv'", content)
+        self.assertIn("'validation': 'validation.csv'", content)
+        self.assertIn("'test': 'test.csv'", content)
 
-    def test_duplicate_or_nonobject_dataset_declarations(self):
-        for objective in ['DATASETS: {} DATASETS: {}', 'DATASETS: []', 'DATASETS: null']:
-            with self.subTest(objective=objective), self.assertRaises(self.schema.EnvException):
-                self.create(objective=objective)
-        self.actions.complete_text.assert_not_called()
+    def test_legacy_objective_does_not_select_files(self):
+        self.create(objective='DATASETS: {"train": "missing.csv"}')
+        self.assertIn("_DATASET_INPUTS = {}", (self.root / "train.py").read_text())
 
 
 if __name__ == "__main__":

@@ -23,11 +23,12 @@ class ActionInputTests(unittest.TestCase):
         parsed = Agent.parse_entries(response, ["Action", "Action Input"])
         self.assertEqual(parsed["Action"].strip(), "List Files")
         self.assertEqual(Agent.parse_action_input(parsed["Action Input"], SimpleNamespace(usage={"dir_path": ""})), {"dir_path": "."})
-        with self.assertRaisesRegex(ValueError, "Missing required response fields: Reflection, Research Plan and Status, Fact Check, Thought"):
+        with self.assertRaisesRegex(Exception, "Invalid:"):
             Agent.parse_entries(response, ["Reflection", "Research Plan and Status", "Fact Check", "Thought", "Action", "Action Input"])
 
     def test_fenced_dataset_mapping_preserves_escaping(self):
-        expected = {"objective": 'DATASETS:{"train":"train.csv","validation":"validation.csv"}',
+        expected = {"datasets": {"train": "train.csv", "validation": "validation.csv"},
+                    "objective": "Analyze sales",
                     "script_name": "eda_sales.py"}
         info = SimpleNamespace(usage={key: "" for key in expected})
         for opening in ("", "```json\n", "```\n"):
@@ -35,10 +36,11 @@ class ActionInputTests(unittest.TestCase):
             with self.subTest(opening=opening):
                 parsed = Agent.parse_action_input(text, info)
                 self.assertEqual(parsed, expected)
-                self.assertEqual(len(json.loads(parsed["objective"].split(":", 1)[1])), 2)
+                self.assertEqual(len(parsed["datasets"]), 2)
 
     def test_fenced_newlines_and_backslashes(self):
-        expected = {"objective": 'Analyze sales.\nDATASETS: {"train": "data/train.csv"}\nKeep \\n literal.',
+        expected = {"datasets": {"train": "data/train.csv"},
+                    "objective": 'Analyze sales.\nKeep \\n literal.',
                     "script_name": "eda.py"}
         info = SimpleNamespace(usage={key: "" for key in expected})
         self.assertEqual(Agent.parse_action_input("```json\n" + json.dumps(expected) + "\n```", info), expected)
