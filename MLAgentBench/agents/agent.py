@@ -7,15 +7,17 @@ import re
 import glob
 import copy
 from argparse import Namespace
-import anthropic
 import MLAgentBench.high_level_actions as high_level_actions
 from MLAgentBench.schema import Action, EnhancedJSONEncoder
-from MLAgentBench.LLM import complete_text
+from MLAgentBench.LLM import AI_PROMPT, complete_text
+from MLAgentBench.data_context import build_data_context
 
 initial_prompt = """You are a helpful research assistant. You have access to the following tools:
 {tools_prompt}
 
 Research Problem: {task_description}
+
+{data_context}
 
 Always respond in this format exactly:
 {format_prompt}
@@ -63,7 +65,8 @@ class Agent:
         high_level_actions.EDIT_SCRIPT_MAX_TOKENS = args.edit_script_llm_max_tokens
         self.tools_prompt = self.construct_tools_prompt(tool_names, env.action_infos)
 
-        self.initial_prompt = initial_prompt.format(tools_prompt=self.tools_prompt, tool_names=self.prompt_tool_names,  task_description=env.research_problem, format_prompt="\n".join([f"{k}: {format_prompt_dict[k]}" for k in self.valid_format_entires]))       
+        self.data_context = build_data_context(env.work_dir) + "\n\n" + env.library_context
+        self.initial_prompt = initial_prompt.format(tools_prompt=self.tools_prompt, tool_names=self.prompt_tool_names, task_description=env.research_problem, data_context=self.data_context, format_prompt="\n".join([f"{k}: {format_prompt_dict[k]}" for k in self.valid_format_entires]))
 
         self.history_steps = []
 
@@ -168,6 +171,12 @@ class Agent:
     @classmethod
     def parse_action_input(cls, s, action_info):
         """ Parse the action input from a string to a dictionary using different methods."""
+        # Remove presentation fences before parsing, without rewriting JSON escapes.
+        # Sanitizing a valid fenced payload corrupts nested JSON in objectives.
+        s = s.strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n\s*```", s, re.DOTALL | re.IGNORECASE)
+        if fenced:
+            s = fenced.group(1).strip()
         try:
             try:
                 d = json.loads(s)
@@ -254,7 +263,7 @@ class SimpleActionAgent(Agent):
 
             for idx in range(max(0, curr_step - last_steps), curr_step):
                 action_string = self.print_action(self.history_steps[idx]["action"], self.valid_format_entires)
-                prompt += anthropic.AI_PROMPT + "\n"+ action_string + "\nObservation:"
+                prompt += AI_PROMPT + "\n"+ action_string + "\nObservation:"
                 prompt += "\n```\n" + self.history_steps[idx]["observation"] + "\n```\n\n"
 
             ###############################################
@@ -273,7 +282,7 @@ class SimpleActionAgent(Agent):
                     valid_response = True
                 except:
                     print("Step", curr_step, file=sys.stderr)
-                    print(anthropic.AI_PROMPT + "\n" + completion + "\nObservation:\n", file=sys.stderr)
+                    print(AI_PROMPT + "\n" + completion + "\nObservation:\n", file=sys.stderr)
                     print("Response is invalid and discarded", file=sys.stderr)
                 else:
                     break
@@ -299,7 +308,7 @@ class SimpleActionAgent(Agent):
 
             with open(os.path.join(self.log_dir , "main_log"), "a", 1) as f:
                 f.write("Step " + str(curr_step) + ":\n")
-                f.write(anthropic.AI_PROMPT + "\n" + self.print_action(entries, self.valid_format_entires) + "\nObservation:\n")
+                f.write(AI_PROMPT + "\n" + self.print_action(entries, self.valid_format_entires) + "\nObservation:\n")
 
 
             ########################################
@@ -330,4 +339,3 @@ class ReasoningActionAgent(SimpleActionAgent):
         super().__init__(args, env)
         self.valid_format_entires = ["Thought", "Action", "Action Input"]
         self.initial_prompt = initial_prompt.format(tools_prompt=self.tools_prompt, tool_names=self.prompt_tool_names,  task_description=env.research_problem, format_prompt="\n".join([f"{k}: {format_prompt_dict[k]}" for k in self.valid_format_entires]))
-    

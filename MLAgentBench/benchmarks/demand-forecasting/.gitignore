@@ -1,0 +1,7 @@
+__pycache__/
+env/*.csv
+env/data_dictionary.json
+env/task_metadata.json
+env/metrics.py
+scripts/answer.csv
+scripts/prepared

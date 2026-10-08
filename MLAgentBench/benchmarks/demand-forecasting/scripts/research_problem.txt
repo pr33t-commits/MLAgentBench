@@ -1,0 +1,24 @@
+Develop a demand forecasting solution that minimizes WMAPE for a fixed 13-week
+forecast at the SKU x store x week level. Read TASK.md for the data contract.
+
+train.csv contains historical weekly sales. validation.csv contains the next
+13 weeks with labels for model selection. test.csv contains the final 13 weeks'
+keys, with labels hidden. Missing sales rows are zero demand, and the provided
+panel is already completed. Preserve every SKU/store, even without item metadata.
+
+For validation, use only sales before the first validation week and inventory
+strictly before that week. Do not use actual sales or inventory from within a
+forecast horizon to predict later weeks in the same horizon. After selecting a
+method, you may refit using train.csv plus validation.csv for the test forecast.
+inventory.csv is restricted to dates before the test forecast origin.
+
+Create submission.csv in the workspace with exactly the columns
+sku,store,week,sales_units and exactly one finite, nonnegative prediction for
+every test.csv key. Decimal predictions are allowed. Do not modify provided data
+or evaluation helpers. Use only supplied data and files in your workspace.
+
+The evaluator minimizes sum(abs(actual - prediction)) / sum(actual) over all
+individual SKU-store-week cells, including zero-demand cells. It does not first
+aggregate by product/store hierarchies or average per-series percentage errors.
+The score is a fraction (0.20 means 20%); lower is better. Leave your solution
+code and submission.csv in the workspace and submit a Final Answer when done.

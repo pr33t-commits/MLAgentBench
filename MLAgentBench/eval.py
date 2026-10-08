@@ -1,5 +1,4 @@
 import os
-import anthropic
 from pathlib import Path
 import re
 import sys

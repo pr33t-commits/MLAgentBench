@@ -13,6 +13,7 @@ USER user
 COPY install.sh .
 COPY Auto-GPT/requirements.txt ./Auto-GPT/
 COPY requirements.txt .
+COPY requirements-ds.txt .
 
 # Install libraries 
 

@@ -23,6 +23,7 @@ pillow
 
 
 # common ml packages
+-r requirements-ds.txt
 torch>=2.0.0
 torchvision
 transformers

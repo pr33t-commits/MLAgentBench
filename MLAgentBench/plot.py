@@ -141,7 +141,7 @@ def get_all_runs_with_log():
     return df , df_no_error
 
 
-lower_the_better_tasks = [ "parkinsons-disease", "feedback", "BabyLM", "llama-inference", "house-price", "vectorization"]
+lower_the_better_tasks = [ "parkinsons-disease", "feedback", "BabyLM", "llama-inference", "house-price", "vectorization", "demand-forecasting"]
 
 # TODO: add propoer label mapping and task name mapping for pretty printing in the figure
 print_labels = {
@@ -154,6 +154,7 @@ print_labels = {
 }
 
 print_task_labels = {
+    "demand-forecasting": "demand-forecasting",
     "cifar10_training" : "cifar10",
     "imdb" : "imdb",
     "ogbn-arxiv" : "ogbn-arxiv",

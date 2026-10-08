@@ -21,6 +21,7 @@ from .high_level_actions import HIGH_LEVEL_ACTIONS
 from .schema import Step, Trace, EnvException, TooLongPromptError, LLMError, EnhancedJSONEncoder 
 from .LLM import complete_text_claude
 from .prepare_task import prepare_task, get_task_info
+from .library_context import build_library_context
 
 class TimeoutException(Exception): pass
 
@@ -71,7 +72,9 @@ class Environment:
         if not args.interactive:
             del self._action_infos["Request Help"]
 
+        self.library_context = build_library_context(args.python)
         self._static_kwargs_for_tools = {
+            "library_context": self.library_context,
             "device": args.device,
             "python": args.python,
             "work_dir": self.work_dir,

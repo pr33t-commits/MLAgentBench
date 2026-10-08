@@ -1,0 +1,13 @@
+# Install with the same Python executable passed to runner --python.
+numpy
+pandas
+scipy
+scikit-learn
+lightgbm
+xgboost
+statsmodels
+matplotlib
+seaborn
+joblib
+tqdm
+pyarrow

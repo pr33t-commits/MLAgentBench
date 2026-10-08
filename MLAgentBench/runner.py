@@ -8,7 +8,10 @@ from MLAgentBench import LLM
 from MLAgentBench.environment import Environment
 from MLAgentBench.agents.agent import Agent, SimpleActionAgent, ReasoningActionAgent
 from MLAgentBench.agents.agent_research import ResearchAgent
-from MLAgentBench.agents.agent_langchain  import LangChainAgent
+try:
+    from MLAgentBench.agents.agent_langchain import LangChainAgent
+except Exception:
+    print("Failed to import LangChainAgent; its optional dependencies are not installed.")
 try:
     from MLAgentBench.agents.agent_autogpt  import AutoGPTAgent
 except:
@@ -28,6 +31,7 @@ def run(agent_cls, args):
         print("=====================================")  
 
         agent = agent_cls(args, env)
+        print(f"Agent's initial prompt :- {agent.initial_prompt}")
         final_message = agent.run(env)
         print("=====================================")
         print("Final message: ", final_message)
@@ -77,4 +81,3 @@ if __name__ == "__main__":
         args.actions_remove_from_prompt.extend(["Retrieval from Research Log", "Append Summary to Research Log", "Reflection"])
     LLM.FAST_MODEL = args.fast_llm_name
     run(getattr(sys.modules[__name__], args.agent_type), args)
-    

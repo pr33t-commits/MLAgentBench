@@ -4,6 +4,8 @@ import os
 from functools import partial
 import tiktoken
 from .schema import TooLongPromptError, LLMError
+import load_dotenv
+load_dotenv.load_dotenv()
 
 enc = tiktoken.get_encoding("cl100k_base")
 
@@ -25,8 +27,12 @@ try:
     # setup anthropic API key
     anthropic_client = anthropic.Anthropic(api_key=open("claude_api_key.txt").read().strip())
 except Exception as e:
+    anthropic = None
     print(e)
     print("Could not load anthropic API key claude_api_key.txt.")
+
+HUMAN_PROMPT = "\n\nHuman:"
+AI_PROMPT = "\n\nAssistant:"
     
 try:
     import openai
@@ -70,8 +76,8 @@ def log_to_file(log_file, prompt, completion, model, max_tokens_to_sample):
     """ Log the prompt and completion to a file."""
     with open(log_file, "a") as f:
         f.write("\n===================prompt=====================\n")
-        f.write(f"{anthropic.HUMAN_PROMPT} {prompt} {anthropic.AI_PROMPT}")
-        num_prompt_tokens = len(enc.encode(f"{anthropic.HUMAN_PROMPT} {prompt} {anthropic.AI_PROMPT}"))
+        f.write(f"{HUMAN_PROMPT} {prompt} {AI_PROMPT}")
+        num_prompt_tokens = len(enc.encode(f"{HUMAN_PROMPT} {prompt} {AI_PROMPT}"))
         f.write(f"\n==================={model} response ({max_tokens_to_sample})=====================\n")
         f.write(completion)
         num_sample_tokens = len(enc.encode(completion))
@@ -85,11 +91,23 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
     if model in loaded_hf_models:
         hf_model, tokenizer = loaded_hf_models[model]
     else:
-        hf_model = AutoModelForCausalLM.from_pretrained(model).to("cuda:9")
         tokenizer = AutoTokenizer.from_pretrained(model)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        hf_model = AutoModelForCausalLM.from_pretrained(model, torch_dtype=dtype).to(device)
+        hf_model.eval()
         loaded_hf_models[model] = (hf_model, tokenizer)
-        
-    encoded_input = tokenizer(prompt, return_tensors="pt", return_token_type_ids=False).to("cuda:9")
+
+    if "qwen3" in model.lower():
+        text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        encoded_input = tokenizer(text, return_tensors="pt", return_token_type_ids=False).to(hf_model.device)
+    else:
+        encoded_input = tokenizer(prompt, return_tensors="pt", return_token_type_ids=False).to(hf_model.device)
     stop_sequence_ids = tokenizer(stop_sequences, return_token_type_ids=False, add_special_tokens=False)
     stopping_criteria = StoppingCriteriaList()
     for stop_sequence_input_ids in stop_sequence_ids.input_ids:
@@ -107,12 +125,11 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
     )
     sequences = output.sequences
     sequences = [sequence[len(encoded_input.input_ids[0]) :] for sequence in sequences]
-    all_decoded_text = tokenizer.batch_decode(sequences)
+    all_decoded_text = tokenizer.batch_decode(sequences, skip_special_tokens=True)
     completion = all_decoded_text[0]
     if log_file is not None:
         log_to_file(log_file, prompt, completion, model, max_tokens_to_sample)
     return completion
-
 
 def complete_text_gemini(prompt, stop_sequences=[], model="gemini-pro", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, **kwargs):
     """ Call the gemini API to complete a prompt."""
@@ -137,10 +154,12 @@ def complete_text_gemini(prompt, stop_sequences=[], model="gemini-pro", max_toke
         log_to_file(log_file, prompt, completion, model, max_tokens_to_sample)
     return completion
 
-def complete_text_claude(prompt, stop_sequences=[anthropic.HUMAN_PROMPT], model="claude-v1", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, messages=None, **kwargs):
+def complete_text_claude(prompt, stop_sequences=[HUMAN_PROMPT], model="claude-v1", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, messages=None, **kwargs):
     """ Call the Claude API to complete a prompt."""
 
-    ai_prompt = anthropic.AI_PROMPT
+    if anthropic is None:
+        raise LLMError("Anthropic is unavailable. Use a huggingface/... model or install and configure Anthropic.")
+    ai_prompt = AI_PROMPT
     if "ai_prompt" in kwargs is not None:
         ai_prompt = kwargs["ai_prompt"]
 
@@ -172,7 +191,7 @@ def complete_text_claude(prompt, stop_sequences=[anthropic.HUMAN_PROMPT], model=
                     pass
         else:
             rsp = anthropic_client.completions.create(
-                prompt=f"{anthropic.HUMAN_PROMPT} {prompt} {ai_prompt}",
+                prompt=f"{HUMAN_PROMPT} {prompt} {ai_prompt}",
                 stop_sequences=stop_sequences,
                 model=model,
                 temperature=temperature,
@@ -240,7 +259,7 @@ def complete_text_crfm(prompt="", stop_sequences = [], model="openai/gpt-4-0314"
     return completion
 
 
-def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_tokens_to_sample=500, temperature=0.2, log_file=None, **kwargs):
+def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_tokens_to_sample=1500, temperature=0.2, log_file=None, **kwargs):
     """ Call the OpenAI API to complete a prompt."""
     raw_request = {
           "model": model,
@@ -265,7 +284,7 @@ def complete_text(prompt, log_file, model, **kwargs):
     
     if model.startswith("claude"):
         # use anthropic API
-        completion = complete_text_claude(prompt, stop_sequences=[anthropic.HUMAN_PROMPT, "Observation:"], log_file=log_file, model=model, **kwargs)
+        completion = complete_text_claude(prompt, stop_sequences=[HUMAN_PROMPT, "Observation:"], log_file=log_file, model=model, **kwargs)
     elif model.startswith("gemini"):
         completion = complete_text_gemini(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
     elif model.startswith("huggingface"):

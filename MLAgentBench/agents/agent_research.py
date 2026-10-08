@@ -1,8 +1,7 @@
 """ This file contains the agent class for our AI research agent."""
 import os
 import sys
-import anthropic
-from MLAgentBench.LLM import complete_text_fast, complete_text
+from MLAgentBench.LLM import AI_PROMPT, complete_text_fast, complete_text
 from MLAgentBench.schema import Action
 from .agent import Agent
 
@@ -11,7 +10,7 @@ initial_prompt = """You are a helpful research assistant. You have access to the
 
 Research Problem: {task_description}
 
-You do not know anything about this problem so far. 
+{data_context}
 
 Follow these instructions and do not forget them:
 - First, come up with a high level plan based on your understanding of the problem and available tools and record it in the Research Plan and Status. You can revise the plan later.
@@ -20,6 +19,7 @@ Follow these instructions and do not forget them:
 - Performance numbers and estimates can only be confirmed and included in the status by running the code and observing the output.
 - You should come up with a good experiment design that addresses the problem, and whenever applicable, define and measure the baseline performance of the relevant system or model before attempting any improvements.
 - Follow the plan and try to achieve the goal as straightforwardly as possible.
+- For tasks with multiple substantial stages, prioritize a modular, resumable workflow: split work into independently runnable scripts or stages (for example, separate feature engineering from forecasting/model training), and save validated intermediate artifacts after each expensive stage so later failures do not discard completed work. Make downstream stages consume saved outputs, support reruns without repeating completed work when practical, and avoid overwriting valid artifacts until replacements are complete. Keep scripts self-contained, log progress and elapsed time, and verify intermediate row counts/schema. Do not add needless modules for trivial tasks.
 - Highlight the supporting experiment results and reasoning before drawing any conclusions. 
 - Do not try installing any new packages or libraries.
 - If you believe you have solved the problem, you can use the Final Answer action to submit your answer. You can only submit once, so double check that you have achieved the goal before submitting.
@@ -43,7 +43,6 @@ format_prompt_dict = {
     "Action Input": "the input to the action as a valid JSON string",
 }
 
-
 class ResearchAgent(Agent):
     """This class implements AI research agent with different configurations."""
 
@@ -52,7 +51,7 @@ class ResearchAgent(Agent):
         self.valid_format_entires = ["Reflection",  "Research Plan and Status","Fact Check", "Thought","Action", "Action Input"] # use all entries by default
         if args.valid_format_entires:
             self.valid_format_entires = args.valid_format_entires
-        self.initial_prompt = initial_prompt.format(tools_prompt=self.tools_prompt, tool_names=self.prompt_tool_names,  task_description=env.research_problem, format_prompt="\n".join([f"{k}: {format_prompt_dict[k]}" for k in self.valid_format_entires]))
+        self.initial_prompt = initial_prompt.format(tools_prompt=self.tools_prompt, tool_names=self.prompt_tool_names, task_description=env.research_problem, data_context=self.data_context, format_prompt="\n".join([f"{k}: {format_prompt_dict[k]}" for k in self.valid_format_entires]))
 
     def run(self, env):
         last_steps = self.args.max_steps_in_context
@@ -92,7 +91,7 @@ class ResearchAgent(Agent):
                 action_string = ""
                 action_string = self.print_action(self.history_steps[idx]["action"], self.valid_format_entires)
 
-                prompt += anthropic.AI_PROMPT + "\n"+ action_string + "\nObservation:"
+                prompt += AI_PROMPT + "\n"+ action_string + "\nObservation:"
                 if curr_step - idx > last_observation_step:
                     prompt += "<Done>\n\n"
                 else:
@@ -118,7 +117,7 @@ class ResearchAgent(Agent):
                     valid_response = True
                 except:
                     print("Step", curr_step, file=sys.stderr)
-                    print(anthropic.AI_PROMPT + "\n" + completion + "\nObservation:\n", file=sys.stderr)
+                    print(AI_PROMPT + "\n" + completion + "\nObservation:\n", file=sys.stderr)
                     print("Response is invalid and discarded", file=sys.stderr)
                     prompt += "\n\n Your response was in incorrect format. Please provide a valid response with all entries: " + ", ".join(self.valid_format_entires) + "\n\n"
                 else:
@@ -150,7 +149,7 @@ class ResearchAgent(Agent):
 
             with open(os.path.join(self.log_dir , "main_log"), "a", 1) as f:
                 f.write("Step " + str(curr_step) + ":\n")
-                f.write(anthropic.AI_PROMPT + "\n" + self.print_action(entries, self.valid_format_entires) + "\nObservation:\n")
+                f.write(AI_PROMPT + "\n" + self.print_action(entries, self.valid_format_entires) + "\nObservation:\n")
 
 
             ########################################
