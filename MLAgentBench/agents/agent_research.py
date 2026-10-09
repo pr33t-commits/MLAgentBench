@@ -40,7 +40,7 @@ format_prompt_dict = {
     "Fact Check": "List all objective statements in the updates to Research Plan and Status one by one and point out whether it is guessed versus directly confirmed by the previous observation directly above. Performance numbers can only be confirmed by running the code and observing the output.",
     "Thought": "What you are currently doing, what actions to perform and why",
     "Action": "the action to take, should be one of the names of the tools",
-    "Action Input": "the input to the action as a valid JSON string",
+    "Action Input": "the input to the action as a valid JSON string. Strictly no extra text other than the valid JSON string. If the action does not require any input, just return an empty JSON object",
 }
 
 class ResearchAgent(Agent):
