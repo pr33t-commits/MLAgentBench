@@ -1,5 +1,17 @@
 """Trusted, key-aligned WMAPE scoring. No aggregation before absolute errors."""
 
+import importlib.util
+from pathlib import Path
+
+# Load the shared label-free contract from trusted benchmark code, even when this
+# scorer is invoked directly from a different current working directory.
+_helper = Path(__file__).resolve().with_name("submission_validation.py")
+if not _helper.exists():
+    _helper = Path(__file__).resolve().parents[3] / "submission_validation.py"
+_spec = importlib.util.spec_from_file_location("demand_submission_validation", _helper)
+_contract = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_contract)
+
 import numpy as np
 import pandas as pd
 
@@ -33,4 +45,5 @@ def score_frames(actual, prediction):
 
 
 def score_files(actual_path, prediction_path):
+    _contract.validate_submission(actual_path, prediction_path)
     return score_frames(pd.read_csv(actual_path), pd.read_csv(prediction_path))

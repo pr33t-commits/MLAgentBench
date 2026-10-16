@@ -1,6 +1,9 @@
 """ This file contains the low level actions that are provided by the environment, mostly file system operations and code execution. """
 
 import os
+import json
+import uuid
+from .completeness import execute_experiment as run_experiment
 import subprocess
 import selectors
 import shutil
@@ -178,6 +181,8 @@ def execute_script(script_name, work_dir = ".", **kwargs):
         device = kwargs["device"]
         python = kwargs["python"]
         cmd = f"CUDA_VISIBLE_DEVICES={device} {python} -u {script_path}"
+        execution_id = "exec_" + uuid.uuid4().hex
+        started_at = time.time()
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True, cwd=work_dir)
 
         stdout_lines = []
@@ -208,7 +213,7 @@ def execute_script(script_name, work_dir = ".", **kwargs):
             print("STDERR:", line, end =" ")
             stderr_lines.append(line)
 
-        return_code = process.returncode
+        return_code = process.wait()
 
         if return_code != 0:
             observation = "".join(stderr_lines)
@@ -217,9 +222,27 @@ def execute_script(script_name, work_dir = ".", **kwargs):
         if observation == "" and return_code == 0:
             # printed to stderr only
             observation = "".join(stderr_lines)
-        return "The script has been executed. Here is the output:\n" + observation
+        return json.dumps({"execution_id": execution_id, "exit_code": return_code,
+                           "started_at": started_at, "finished_at": time.time(),
+                           "ok": return_code == 0, "output": observation})
     except Exception as e:
         raise EnvException(f"Something went wrong in executing {script_name}: {e}. Please check if it is ready to be executed.")
+
+
+@record_low_level_step
+def execute_experiment(script_name, role, parent_submission_id, work_dir=".", **kwargs):
+    """Execute and archive a demand-forecasting submission."""
+    root = kwargs.get("receipt_dir")
+    if not root:
+        raise EnvException("Execute Experiment is only enabled for demand-forecasting")
+    try:
+        receipt = run_experiment(script_name, role, parent_submission_id, work_dir,
+                                 root, kwargs["python"],
+                                 timeout=max(1, getattr(kwargs.get("args"), "max_time", 600)),
+                                 device=kwargs.get("device", ""))
+        return json.dumps(receipt)
+    except (ValueError, OSError, KeyError) as exc:
+        raise EnvException(str(exc)) from exc
 
 
 @record_low_level_step
@@ -324,6 +347,16 @@ LOW_LEVEL_ACTIONS = [
         },
         return_value="The observation will be output of the script or errors.",
         function=execute_script,
+        is_primitive=True
+    ),
+    ActionInfo(
+        name="Execute Experiment",
+        description="Run a baseline or experiment and register its test submission. Read inputs from the workspace. The script MUST write submission.csv under os.environ['EXPERIMENT_OUTPUT_DIR']. Outputs are fresh for each execution. An experiment requires an accepted baseline execution ID. Returns a structured receipt; no hidden test score is exposed.",
+        usage={"script_name": "existing Python script relative to workspace",
+               "role": "baseline or experiment",
+               "parent_submission_id": "accepted baseline execution_id for experiment; empty string for baseline"},
+        return_value="Execution receipt including accepted status, errors, source hashes and artifact hash.",
+        function=execute_experiment,
         is_primitive=True
     ),
     ActionInfo(

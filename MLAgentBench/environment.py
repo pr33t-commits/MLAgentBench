@@ -72,8 +72,21 @@ class Environment:
         if not args.interactive:
             del self._action_infos["Request Help"]
 
+        receipt_dir = None
+        if not args.interactive and args.task == "demand-forecasting":
+            receipt_dir = os.path.abspath(os.path.join(self.log_dir, "completeness"))
+            if os.path.commonpath([receipt_dir, os.path.abspath(self.work_dir)]) == os.path.abspath(self.work_dir):
+                raise ValueError("Demand-forecasting logs must be outside the agent workspace")
+            os.makedirs(receipt_dir, exist_ok=True)
+            # Preserve the initial test contract before any agent code executes.
+            shutil.copyfile(os.path.join(self.work_dir, "test.csv"),
+                            os.path.join(receipt_dir, "test_keys.csv"))
+        else:
+            del self._action_infos["Execute Experiment"]
+
         self.library_context = build_library_context(args.python)
         self._static_kwargs_for_tools = {
+            "receipt_dir": receipt_dir,
             "library_context": self.library_context,
             "device": args.device,
             "python": args.python,

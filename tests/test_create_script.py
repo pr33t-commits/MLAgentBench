@@ -196,6 +196,26 @@ print("loaded real inputs")
         self.create(objective='DATASETS: {"train": "missing.csv"}')
         self.assertIn("_DATASET_INPUTS = {}", (self.root / "train.py").read_text())
 
+    def test_registered_experiment_action_records_receipt(self):
+        receipts = self.root.parent / (self.root.name + "_receipts")
+        receipts.mkdir()
+        import shutil
+        self.addCleanup(shutil.rmtree, receipts)
+        (receipts / "test_keys.csv").write_text("sku,store,week\na,s,w\n")
+        (self.root / "baseline.py").write_text(
+            "import os\nfrom pathlib import Path\n"
+            "(Path(os.environ['EXPERIMENT_OUTPUT_DIR'])/'submission.csv').write_text("
+            "'sku,store,week,sales_units\\na,s,w,1\\n')")
+        low = importlib.import_module("_create_script_test.low_level_actions")
+        action = next(a for a in low.LOW_LEVEL_ACTIONS if a.name == "Execute Experiment")
+        result = json.loads(action.function(
+            script_name="baseline.py", role="baseline", parent_submission_id="",
+            work_dir=str(self.root), receipt_dir=str(receipts), python=sys.executable,
+            trace=self.trace))
+        self.assertTrue(result["accepted"])
+        self.assertEqual(self.trace.low_level_steps[-1].action.name, "Execute Experiment")
+        self.assertEqual(json.loads(self.trace.low_level_steps[-1].observation)["exit_code"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

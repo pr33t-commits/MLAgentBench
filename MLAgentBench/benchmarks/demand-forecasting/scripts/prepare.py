@@ -88,6 +88,7 @@ def prepare(source, output=BENCHMARK):
     (env / "data_dictionary.json").write_text(json.dumps(dictionary, indent=2) + "\n", encoding="utf-8")
     (env / "task_metadata.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     shutil.copyfile(SCRIPTS / "scoring.py", env / "metrics.py")
+    shutil.copyfile(SCRIPTS.parents[2] / "submission_validation.py", env / "submission_validation.py")
     return manifest
 
 

@@ -97,3 +97,9 @@ Run the contract tests (synthetic data/predictions, no models):
 ```bash
 python MLAgentBench/benchmarks/demand-forecasting/scripts/test_task.py
 ```
+
+## Completeness evaluation
+
+New runs require registered baseline and experimental submissions. See
+[the completeness workflow](../../../docs/completeness.md) for Execute Experiment,
+label-free verification, and the optional distinctness judge adapter.

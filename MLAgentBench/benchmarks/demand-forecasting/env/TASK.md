@@ -32,6 +32,10 @@ all provided inventory. No observed outcomes inside the test horizon are known.
 Calendar features and recursively predicted lags are allowed. Random row splits
 and future observed lags are inappropriate for this task.
 
+Before final submission, explore and compare different demand forecasting
+modeling families or philosophies. Use validation performance to select the
+final approach.
+
 ## Submission and metric
 
 Write `submission.csv` with exactly `sku,store,week,sales_units`, one row per
@@ -54,3 +58,23 @@ You may create and edit your own solution code. Keep supplied data, metadata,
 task instructions, and scoring helpers unchanged. Stay within the workspace;
 do not access source data or hidden evaluation files outside it. Leave your code
 and final submission in the workspace before submitting a Final Answer.
+
+
+Completeness contract:
+Produce and preserve BOTH a baseline test submission and a test submission from
+at least one changed modeling approach. First use Execute Experiment with
+role="baseline" and parent_submission_id="". Then use it with role="experiment"
+and parent_submission_id set to the accepted baseline execution_id. Repair and
+rerun rejected executions. Merely writing a script or describing an experiment
+does not count. Comment, filename, and random-seed-only changes do not qualify.
+
+Scripts must save their test predictions to:
+    Path(os.environ["EXPERIMENT_OUTPUT_DIR"]) / "submission.csv"
+Import pathlib.Path and os as needed. Each execution receives a fresh output
+directory. Continue reading the supplied data from the workspace. The tool
+archives submissions, source/configuration snapshots, and execution receipts.
+Validation comparisons remain required; do not use hidden test performance.
+The experiment need not outperform the baseline. Select either accepted approach
+using validation performance, copy its predictions to workspace submission.csv,
+and leave solution code and a Final Answer as usual. Final model selection does
+not discard either registered submission.

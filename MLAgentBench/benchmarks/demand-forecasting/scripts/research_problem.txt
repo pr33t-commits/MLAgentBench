@@ -12,6 +12,10 @@ forecast horizon to predict later weeks in the same horizon. After selecting a
 method, you may refit using train.csv plus validation.csv for the test forecast.
 inventory.csv is restricted to dates before the test forecast origin.
 
+Before final submission, explore and compare different demand forecasting
+modeling families or philosophies. Use validation performance to select the
+final approach.
+
 Create submission.csv in the workspace with exactly the columns
 sku,store,week,sales_units and exactly one finite, nonnegative prediction for
 every test.csv key. Decimal predictions are allowed. Do not modify provided data
@@ -22,3 +26,23 @@ individual SKU-store-week cells, including zero-demand cells. It does not first
 aggregate by product/store hierarchies or average per-series percentage errors.
 The score is a fraction (0.20 means 20%); lower is better. Leave your solution
 code and submission.csv in the workspace and submit a Final Answer when done.
+
+
+Completeness contract:
+Produce and preserve BOTH a baseline test submission and a test submission from
+at least one changed modeling approach. First use Execute Experiment with
+role="baseline" and parent_submission_id="". Then use it with role="experiment"
+and parent_submission_id set to the accepted baseline execution_id. Repair and
+rerun rejected executions. Merely writing a script or describing an experiment
+does not count. Comment, filename, and random-seed-only changes do not qualify.
+
+Scripts must save their test predictions to:
+    Path(os.environ["EXPERIMENT_OUTPUT_DIR"]) / "submission.csv"
+Import pathlib.Path and os as needed. Each execution receives a fresh output
+directory. Continue reading the supplied data from the workspace. The tool
+archives submissions, source/configuration snapshots, and execution receipts.
+Validation comparisons remain required; do not use hidden test performance.
+The experiment need not outperform the baseline. Select either accepted approach
+using validation performance, copy its predictions to workspace submission.csv,
+and leave solution code and a Final Answer as usual. Final model selection does
+not discard either registered submission.
