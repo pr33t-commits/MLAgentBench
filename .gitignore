@@ -16,3 +16,10 @@ __pycache__/
 .env.*
 !.env.template
 /lgbm_forecasting_manual.py
+
+# Keep only the demand-forecasting benchmark in Git; other benchmark files
+# remain available locally but are not staged for future commits.
+/MLAgentBench/benchmarks/*
+!/MLAgentBench/benchmarks/demand-forecasting/
+!/MLAgentBench/benchmarks/demand-forecasting/**
+!/MLAgentBench/benchmarks/tasks.json
