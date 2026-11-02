@@ -42,7 +42,46 @@ values using an initial test-key copy. It never reads hidden labels. Regular
 Execute Script also reports structured exit status, but does not register a
 submission: use Execute Experiment for completeness milestones.
 
+Execute Experiment returns stdout and stderr, including ordinary full tracebacks
+and printed validation metrics. Each stream is limited to its last 16,000 bytes
+in the immediate response, with explicit truncation and byte counts. Full logs
+remain archived: use Read Experiment Log with execution_id, stream (stdout or
+stderr), and offset=0, then follow next_offset until null. List Experiments
+recovers exact IDs and script names when earlier observations leave context.
+Source hashes remain in the receipt archive but are omitted from tool responses
+to keep debugging feedback readable. These tools are enabled only for the
+demand-forecasting environment, alongside Execute Experiment.
+
+For multi-stage work, write explicit stage input/output contracts and preserve
+validated intermediate artifacts. Execute Script runs intermediate stages;
+Execute Experiment registers a submission-producing stage. Creating or editing
+a script does not establish that it executes successfully. Read actual errors
+before changing code, and keep accepted IDs and artifact paths in the research
+plan rather than recreating completed work. Create Script includes small raw
+input samples to ground dtype/date-format decisions; samples are not a full
+dataset profile.
+
 ## Offline verification
+
+The runner automatically scores every accepted registered baseline and experiment
+after the agent stops, including when its run ends with an exception or timeout.
+It calls the task's trusted `scripts/eval.py:get_score` on each archived
+submission and writes `env_log/test_metrics.json`. For demand forecasting this
+is key-aligned WMAPE over all SKU/store/week cells, expressed as a fraction;
+lower is better. Hidden test scores are not returned as agent observations.
+
+The report's `experiments` object is keyed by the exact `execution_id` returned
+to the agent by Execute Experiment. Each entry includes its role,
+`parent_submission_id`, script, artifact hash/path, `test_score`, and scoring
+status. Rejected executions are skipped. Missing, changed or invalid artifacts
+and evaluator failures receive a null score and an explicit error; other
+executions are still evaluated. No model is rerun to obtain predictions.
+
+`selected_submission` matches workspace `submission.csv` to scored archives by
+SHA-256. It lists all matching execution IDs when multiple archives contain
+identical bytes. An unmatched or missing final file has no inferred ID or score.
+All registered scores remain available even if only one solution is selected.
+Tasks without experiment registration retain their existing evaluation workflow.
 
 From the MLAgentBench repository:
 

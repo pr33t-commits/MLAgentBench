@@ -3,7 +3,10 @@
 import os
 import json
 import uuid
-from .completeness import execute_experiment as run_experiment
+from .execution_runtime import run_script, SCRIPT_TIMEOUT
+from .provenance import execution_command
+from .completeness import (execute_experiment as run_experiment,
+                           read_experiment_log, list_experiments)
 import subprocess
 import selectors
 import shutil
@@ -180,51 +183,22 @@ def execute_script(script_name, work_dir = ".", **kwargs):
         script_path = script_name
         device = kwargs["device"]
         python = kwargs["python"]
-        cmd = f"CUDA_VISIBLE_DEVICES={device} {python} -u {script_path}"
+        cmd, process_env = execution_command(python, os.path.abspath(os.path.join(work_dir, script_path)),
+                                             work_dir, kwargs.get("provenance_log"), kwargs.get("provenance_dir"),
+                                             protected_features=kwargs.get("protected_features", False))
+        process_env["CUDA_VISIBLE_DEVICES"] = str(device)
         execution_id = "exec_" + uuid.uuid4().hex
         started_at = time.time()
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True, cwd=work_dir)
-
-        stdout_lines = []
-        stderr_lines = []
-
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
-        selector.register(process.stderr, selectors.EVENT_READ)
-
-        while process.poll() is None and selector.get_map():
-            events = selector.select(timeout=1)
-
-            for key, _ in events:
-                line = key.fileobj.readline()
-                if key.fileobj == process.stdout:
-                    print("STDOUT:", line, end =" ")
-                    stdout_lines.append(line)
-                else:
-                    print("STDERR:", line, end =" ")
-                    stderr_lines.append(line)
-
-        for line in process.stdout:
-            line = line
-            print("STDOUT:", line, end =" ")
-            stdout_lines.append(line)
-        for line in process.stderr:
-            line = line
-            print("STDERR:", line, end =" ")
-            stderr_lines.append(line)
-
-        return_code = process.wait()
-
-        if return_code != 0:
-            observation = "".join(stderr_lines)
-        else:
-            observation = "".join(stdout_lines)
-        if observation == "" and return_code == 0:
-            # printed to stderr only
-            observation = "".join(stderr_lines)
-        return json.dumps({"execution_id": execution_id, "exit_code": return_code,
-                           "started_at": started_at, "finished_at": time.time(),
-                           "ok": return_code == 0, "output": observation})
+        result = run_script(cmd, work_dir, process_env,
+                            session_deadline=kwargs.get("session_deadline"))
+        result.update(execution_id=execution_id, started_at=started_at, finished_at=time.time())
+        result["output"] = result["stdout"] if result["ok"] else result["stderr"]
+        if result["feedback"]:
+            result["output"] = result["feedback"] + "\n" + result["stdout"] + result["stderr"]
+        if kwargs.get("log_file"):
+            with open(kwargs["log_file"], "w", encoding="utf-8") as log:
+                json.dump(result, log, indent=2)
+        return json.dumps(result)
     except Exception as e:
         raise EnvException(f"Something went wrong in executing {script_name}: {e}. Please check if it is ready to be executed.")
 
@@ -238,9 +212,28 @@ def execute_experiment(script_name, role, parent_submission_id, work_dir=".", **
     try:
         receipt = run_experiment(script_name, role, parent_submission_id, work_dir,
                                  root, kwargs["python"],
-                                 timeout=max(1, getattr(kwargs.get("args"), "max_time", 600)),
-                                 device=kwargs.get("device", ""))
-        return json.dumps(receipt)
+                                 timeout=SCRIPT_TIMEOUT, session_deadline=kwargs.get("session_deadline"),
+                                 device=kwargs.get("device", ""),
+                                 provenance_log=kwargs.get("provenance_log"),
+                                 provenance_dir=kwargs.get("provenance_dir"),
+                                 protected_features=kwargs.get("protected_features", False))
+        return json.dumps({k: v for k, v in receipt.items() if k != "source_hashes"})
+    except (ValueError, OSError, KeyError) as exc:
+        raise EnvException(str(exc)) from exc
+
+
+@record_low_level_step
+def inspect_experiment_log(execution_id, stream, offset, **kwargs):
+    try:
+        return json.dumps(read_experiment_log(kwargs["receipt_dir"], execution_id, stream, offset))
+    except (ValueError, OSError, KeyError) as exc:
+        raise EnvException(str(exc)) from exc
+
+
+@record_low_level_step
+def list_experiment_records(**kwargs):
+    try:
+        return json.dumps(list_experiments(kwargs["receipt_dir"]))
     except (ValueError, OSError, KeyError) as exc:
         raise EnvException(str(exc)) from exc
 
@@ -248,6 +241,19 @@ def execute_experiment(script_name, role, parent_submission_id, work_dir=".", **
 @record_low_level_step
 def python_repl(command, work_dir = ".", **kwargs):
     """Run command and returns anything printed."""
+    if kwargs.get("protected_features"):
+        from pathlib import Path
+        script = Path(work_dir).resolve() / (".repl_" + uuid.uuid4().hex + ".py")
+        script.write_text(command, encoding="utf-8")
+        try:
+            cmd, env = execution_command(kwargs.get("python", sys.executable), script, work_dir,
+                                         kwargs.get("provenance_log"), kwargs.get("provenance_dir"),
+                                         protected_features=True)
+            result = subprocess.run(cmd, cwd=work_dir, env=env, capture_output=True, text=True,
+                                    timeout=kwargs.get("timeout", 600))
+            return result.stdout + result.stderr
+        finally:
+            script.unlink(missing_ok=True)
     try:
         cwd = os.getcwd()
         import codeop
@@ -341,7 +347,7 @@ LOW_LEVEL_ACTIONS = [
     ),
     ActionInfo(
         name="Execute Script",
-        description="Use this to execute the python script. The script must already exist.",
+        description="Use this to execute the python script. The script must already exist. Execution has a 600-second limit, or the remaining session budget if shorter. Timeout feedback includes partial output and whether engine.build() was active.",
         usage={
             "script_name": "a valid python script name with relative path to current directory if needed"
         },
@@ -351,12 +357,29 @@ LOW_LEVEL_ACTIONS = [
     ),
     ActionInfo(
         name="Execute Experiment",
-        description="Run a baseline or experiment and register its test submission. Read inputs from the workspace. The script MUST write submission.csv under os.environ['EXPERIMENT_OUTPUT_DIR']. Outputs are fresh for each execution. An experiment requires an accepted baseline execution ID. Returns a structured receipt; no hidden test score is exposed.",
+        description="Run a baseline or experiment and register its test submission. Execution has a 600-second limit, or the remaining session budget if shorter; receipts include engine.build() timing and timeout diagnostics. Read inputs from the workspace. The script MUST write submission.csv under os.environ['EXPERIMENT_OUTPUT_DIR']. Outputs are fresh for each execution. An experiment requires an accepted baseline execution ID. Returns acceptance status, exit code, stdout and stderr (tails when large). For rejected runs, inspect stderr before editing; use Read Experiment Log for truncated output. Use List Experiments to recover baseline IDs. No hidden test score is exposed.",
         usage={"script_name": "existing Python script relative to workspace",
                "role": "baseline or experiment",
                "parent_submission_id": "accepted baseline execution_id for experiment; empty string for baseline"},
         return_value="Execution receipt including accepted status, errors, source hashes and artifact hash.",
         function=execute_experiment,
+        is_primitive=True
+    ),
+    ActionInfo(
+        name="Read Experiment Log",
+        description="Read archived stdout or stderr for an execution. Start with offset 0; use next_offset until null to retrieve the entire log. Read the actual traceback before proposing fixes. Does not expose hidden labels or allow arbitrary paths.",
+        usage={"execution_id": "exact ID from Execute Experiment or List Experiments",
+               "stream": "stdout or stderr", "offset": "nonnegative byte offset, initially 0"},
+        return_value="Log text, total_bytes and next_offset (null at end).",
+        function=inspect_experiment_log,
+        is_primitive=True
+    ),
+    ActionInfo(
+        name="List Experiments",
+        description="Recover prior experiment IDs, script names and acceptance status for this run. Use an accepted baseline ID as parent_submission_id; never guess an ID or recreate a baseline just because its receipt left context.",
+        usage={},
+        return_value="Execution records in chronological order.",
+        function=list_experiment_records,
         is_primitive=True
     ),
     ActionInfo(

@@ -7,7 +7,9 @@ Python, pandas, and NumPy. The full agent runner uses MLAgentBench's dependencie
 ## Framework integration
 
 - `prepare_task.py:get_task_info` resolves the task in `benchmarks/tasks.json`
-  and reads `scripts/research_problem.txt`.
+  and reads `scripts/research_problem.txt`. This is the single task instruction
+  source inserted into the agent prompt, including the data contract, execution
+  ID linkage, and final-answer format. No separate task instruction file is needed.
 - `prepare_task.py:prepare_task` runs `scripts/prepare.py` once, then writes
   `scripts/prepared`. The source defaults to the sibling `DS_Agent/dataset`.
 - `environment.py:_initialize_task_env` copies **only** `env/` into the agent's
@@ -35,13 +37,13 @@ row; they remain in all splits. Sales units are the available proxy for demand.
 
 | Split | Monday week starts | Rows |
 | --- | --- | ---: |
-| Train | 2020-01-06 through 2022-06-27 | 65,000 |
-| Validation | 2022-07-04 through 2022-09-26 | 6,500 |
+| Train | 2020-01-06 through 2022-09-26 | 71,500 |
 | Hidden test | 2022-10-03 through 2022-12-26 | 6,500 |
 
-Each holdout is a fixed-origin 13-week forecast. Inventory is cut strictly before
-2022-10-03. Validation must additionally filter inventory before 2022-07-04.
-Validation labels may be used for final fitting after model selection.
+Test is a fixed-origin 13-week forecast. Inventory is cut strictly before
+2022-10-03. The agent chooses its own validation methodology from train.csv and
+restricts observations to those available at each chosen forecast origin.
+All training history may be used for final fitting after model selection.
 
 The metric is `sum(abs(actual - forecast)) / sum(actual)` at SKU x store x week,
 reported as a fraction. Absolute errors are taken before any summation; zero

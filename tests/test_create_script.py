@@ -49,6 +49,59 @@ class CreateScriptTests(unittest.TestCase):
         args.update(overrides)
         return self.actions.create_script(**args)
 
+    def test_feature_guide_is_controlled_only_by_boolean_input(self):
+        for enabled, protected in ((False, True), (False, False), (True, True), (True, False)):
+            with self.subTest(enabled=enabled, protected=protected):
+                self.create(use_demand_engine=enabled, protected_features=protected,
+                            script_name=f'flag_{enabled}_{protected}.py')
+                prompt = self.actions.complete_text.call_args.args[0]
+                self.assertEqual("Example: built-in feature specs" in prompt, enabled)
+                self.assertEqual("def value_range(window):" in prompt, enabled)
+                self.assertEqual("Pass loaded DATASETS DataFrames to demand_engine" in prompt, enabled)
+
+    def test_feature_flag_defaults_false_and_rejects_non_booleans(self):
+        self.create(protected_features=True)
+        self.assertNotIn('Forecast feature utilities', self.actions.complete_text.call_args.args[0])
+        self.actions.complete_text.reset_mock()
+        for value in ('true', 'false', 0, 1, None):
+            with self.subTest(value=value), self.assertRaisesRegex(self.schema.EnvException, 'JSON boolean'):
+                self.create(use_demand_engine=value, script_name='invalid.py')
+        self.actions.complete_text.assert_not_called()
+        self.assertFalse((self.root / 'invalid.py').exists())
+
+    def test_usage_matches_agent_inputs_and_runtime_is_keyword_only(self):
+        import inspect
+        signature = inspect.signature(self.actions.create_script)
+        action = next(a for a in self.actions.HIGH_LEVEL_ACTIONS if a.name == 'Create Script (AI)')
+        runtime = {'work_dir', 'research_problem', 'kwargs'}
+        self.assertEqual(set(signature.parameters) - runtime, set(action.usage))
+        for name in ('work_dir', 'research_problem', 'use_demand_engine'):
+            self.assertEqual(signature.parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
+
+    def test_inspect_trusted_feature_source_ignores_workspace_shadow(self):
+        shadow = self.root / '@trusted'
+        shadow.mkdir()
+        (shadow / 'forecast_features.py').write_text('workspace shadow')
+        result = self.actions.inspect_script_lines('@trusted/forecast_features.py', 1, 20,
+                                                  work_dir=str(self.root), trace=self.trace)
+        self.assertIn('Target-row feature windows', result)
+        self.assertNotIn('workspace shadow', result)
+        action = next(a for a in self.actions.HIGH_LEVEL_ACTIONS if a.name == 'Inspect Script Lines')
+        self.assertIn('@trusted/forecast_features.py', action.usage['script_name'])
+        with self.assertRaises(self.schema.EnvException):
+            self.actions.inspect_script_lines('@trusted/environment.py', 1, 10,
+                                              work_dir=str(self.root), trace=self.trace)
+        for start, end in ((0, 10), (10, 1)):
+            with self.subTest(start=start, end=end), self.assertRaises(self.schema.EnvException):
+                self.actions.inspect_script_lines('@trusted/forecast_features.py', start, end,
+                                                  work_dir=str(self.root))
+
+    def test_inspect_workspace_script_still_works(self):
+        (self.root / 'small.py').write_text('first\nsecond\nthird')
+        result = self.actions.inspect_script_lines('small.py', 2, 2,
+                                                  work_dir=str(self.root), trace=self.trace)
+        self.assertTrue(result.endswith('second'))
+
     def test_understand_tables_never_calls_llm(self):
         self.actions.complete_text_fast.reset_mock()
         for filename, separator in [("sales.csv", ","), ("sales.tsv.gz", "\t")]:
@@ -85,7 +138,7 @@ class CreateScriptTests(unittest.TestCase):
 
     def test_registered_action_creates_and_records_without_execution(self):
         action = next(a for a in self.actions.HIGH_LEVEL_ACTIONS if a.name == "Create Script (AI)")
-        self.assertEqual(set(action.usage), {"datasets", "objective", "script_name"})
+        self.assertEqual(set(action.usage), {"datasets", "objective", "script_name", "use_demand_engine"})
         self.assertIs(action.function, self.actions.create_script)
         self.assertIn("Created train.py", self.create(library_context="sklearn available, version TEST"))
         self.assertIn("raise RuntimeError", (self.root / "train.py").read_text())
@@ -151,6 +204,8 @@ print("loaded real inputs")
         prompt = self.actions.complete_text.call_args.args[0]
         self.assertIn('"sales_units"', prompt)
         self.assertIn('"category"', prompt)
+        self.assertIn('"sample_rows"', prompt)
+        self.assertIn('"sales_units": "7"', prompt)
         self.assertIn("NO tools", prompt)
         self.assertIn("_DATASET_INPUTS =", prompt)
         self.assertIn("input files", prompt)
@@ -177,10 +232,12 @@ print("loaded real inputs")
         self.create(objective='Read sales', datasets={"sales": "sales.csv*"})
         self.assertIn("'sales': 'sales.csv'", (self.root / "train.py").read_text())
 
-    def test_tool_example_parses_and_creates_with_structured_datasets(self):
+    def test_tool_request_parses_and_creates_with_structured_datasets(self):
         from test_action_input import Agent
         action = next(a for a in self.actions.HIGH_LEVEL_ACTIONS if a.name == "Create Script (AI)")
-        raw = action.description.split("Action Input: ", 1)[1].splitlines()[0]
+        raw = json.dumps({"datasets": {"input": "input.csv"},
+                          "objective": "Validate the input schema", "script_name": "validate.py",
+                          "use_demand_engine": False})
         parsed = Agent.parse_action_input(raw, action)
         self.assertIsInstance(parsed["datasets"], dict)
         self.assertNotIn("DATASETS:", parsed["objective"])
@@ -188,9 +245,7 @@ print("loaded real inputs")
             (self.root / name).write_text("sales_units\n5\n")
         self.create(**parsed)
         content = (self.root / parsed["script_name"]).read_text()
-        self.assertIn("'train': 'train.csv'", content)
-        self.assertIn("'validation': 'validation.csv'", content)
-        self.assertIn("'test': 'test.csv'", content)
+        self.assertIn("'input': 'input.csv'", content)
 
     def test_legacy_objective_does_not_select_files(self):
         self.create(objective='DATASETS: {"train": "missing.csv"}')
@@ -215,6 +270,14 @@ print("loaded real inputs")
         self.assertTrue(result["accepted"])
         self.assertEqual(self.trace.low_level_steps[-1].action.name, "Execute Experiment")
         self.assertEqual(json.loads(self.trace.low_level_steps[-1].observation)["exit_code"], 0)
+        self.assertNotIn("source_hashes", result)
+        self.assertIn("stderr", result)
+        records = json.loads(low.list_experiment_records(receipt_dir=str(receipts), trace=self.trace))
+        self.assertEqual(records[0]["execution_id"], result["execution_id"])
+        output = json.loads(low.inspect_experiment_log(
+            execution_id=result["execution_id"], stream="stdout", offset=0,
+            receipt_dir=str(receipts), trace=self.trace))
+        self.assertIsNone(output["next_offset"])
 
 
 if __name__ == "__main__":

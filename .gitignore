@@ -1,1 +1,18 @@
 /MLAgentBench/benchmarks/cifar10/env/data/cifar-10-python.tar.gz
+
+# Local environments, caches, runs and Windows download metadata.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv*/
+*.egg-info/
+**/runs/
+**/workspaces/
+/df_qwen3.5_4B/
+**/preparation_provenance/
+*.log
+*Zone.Identifier
+.env
+.env.*
+!.env.template
+/lgbm_forecasting_manual.py

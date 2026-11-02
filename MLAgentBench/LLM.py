@@ -72,9 +72,10 @@ class StopAtSpecificTokenCriteria(StoppingCriteria):
         return bool(torch.all(current_sequence == stop_sequence_tensor).item())
 
     
-def log_to_file(log_file, prompt, completion, model, max_tokens_to_sample):
+def log_to_file(log_file, prompt, completion, model, max_tokens_to_sample, api_metadata=None):
     """ Log the prompt and completion to a file."""
-    with open(log_file, "a") as f:
+    import json
+    with open(log_file, "a", encoding="utf-8") as f:
         f.write("\n===================prompt=====================\n")
         f.write(f"{HUMAN_PROMPT} {prompt} {AI_PROMPT}")
         num_prompt_tokens = len(enc.encode(f"{HUMAN_PROMPT} {prompt} {AI_PROMPT}"))
@@ -82,9 +83,35 @@ def log_to_file(log_file, prompt, completion, model, max_tokens_to_sample):
         f.write(completion)
         num_sample_tokens = len(enc.encode(completion))
         f.write("\n===================tokens=====================\n")
-        f.write(f"Number of prompt tokens: {num_prompt_tokens}\n")
-        f.write(f"Number of sampled tokens: {num_sample_tokens}\n")
+        f.write(f"Estimated prompt tokens (local tokenizer): {num_prompt_tokens}\n")
+        f.write(f"Estimated visible completion tokens (local tokenizer): {num_sample_tokens}\n")
+        if api_metadata is not None:
+            f.write("\n===================API usage and response metadata=====================\n")
+            f.write(json.dumps(api_metadata, ensure_ascii=False, indent=2) + "\n")
+            f.write("\n===================reasoning summaries (not raw reasoning)=====================\n")
+            f.write("\n\n".join(api_metadata.get("reasoning_summaries", [])) or "No reasoning summary returned.")
         f.write("\n\n")
+    if api_metadata is not None:
+        with open(str(log_file) + ".usage.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(api_metadata, ensure_ascii=False) + "\n")
+
+
+def request_openai_responses(payload, timeout=600):
+    """Use Responses without upgrading this project's legacy OpenAI SDK."""
+    import requests
+    key = getattr(openai, "api_key", None) or os.environ.get("OPENAI_API_KEY")
+    if not key:
+        raise LLMError("An OpenAI API key is required.")
+    base = os.environ.get("OPENAI_BASE_URL") or getattr(openai, "api_base", None) or "https://api.openai.com/v1"
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    organization = getattr(openai, "organization", None) or os.environ.get("OPENAI_ORG_ID")
+    if organization:
+        headers["OpenAI-Organization"] = organization
+    if os.environ.get("OPENAI_PROJECT_ID"):
+        headers["OpenAI-Project"] = os.environ["OPENAI_PROJECT_ID"]
+    response = requests.post(base.rstrip("/") + "/responses", json=payload, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/CodeLlama-7b-hf", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, **kwargs):
     model = model.split("/", 1)[1]
@@ -259,24 +286,75 @@ def complete_text_crfm(prompt="", stop_sequences = [], model="openai/gpt-4-0314"
     return completion
 
 
-def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_tokens_to_sample=1500, temperature=0.2, log_file=None, **kwargs):
-    """ Call the OpenAI API to complete a prompt."""
-    raw_request = {
-          "model": model,
-          "temperature": temperature,
-          "max_tokens": max_tokens_to_sample,
-          "stop": stop_sequences or None,  # API doesn't like empty list
-          **kwargs
-    }
-    if model.startswith("gpt-3.5") or model.startswith("gpt-4"):
-        messages = [{"role": "user", "content": prompt}]
-        response = openai.ChatCompletion.create(**{"messages": messages,**raw_request})
-        completion = response["choices"][0]["message"]["content"]
+def complete_text_openai(prompt, stop_sequences=None, model="gpt-3.5-turbo", max_tokens_to_sample=8000, temperature=0.2, log_file=None, **kwargs):
+    """Use Responses for reasoning models; retain existing chat/text routes."""
+    import re
+    base_model = model.split(":")[1] if model.startswith("ft:") else model
+    reasoning = bool(re.match(r"(?:gpt-(?:[5-9]|[1-9][0-9])(?:[.\-]|$)|o[1-9](?:-|$))", base_model))
+    chat = (base_model.startswith(("gpt-", "chatgpt-")) or reasoning) and "instruct" not in base_model
+    raw_request = {"model": model, **kwargs}
+    stops = raw_request.pop("stop", stop_sequences) or []
+    stops = [stops] if isinstance(stops, str) else stops
+    summaries = []
+    if reasoning:
+        token_limit = raw_request.pop("max_tokens", max_tokens_to_sample)
+        token_limit = raw_request.pop("max_completion_tokens", token_limit)
+        raw_request.setdefault("max_output_tokens", token_limit)
+        config = dict(raw_request.pop("reasoning", None) or {})
+        effort = raw_request.pop("reasoning_effort", None)
+        if effort is not None:
+            config.setdefault("effort", effort)
+        config["summary"] = "auto"
+        raw_request["reasoning"] = config
+        raw_request.setdefault("store", False)
+        for key in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+            raw_request.pop(key, None)
+        timeout = raw_request.pop("request_timeout", 600)
+        response = request_openai_responses({"input": prompt, **raw_request}, timeout=timeout)
+        text_parts = []
+        for item in response.get("output", []):
+            if item.get("type") == "message" and item.get("role") == "assistant":
+                text_parts.extend(part["text"] for part in item.get("content", [])
+                                  if part.get("type") == "output_text")
+            elif item.get("type") == "reasoning":
+                summaries.extend(part["text"] for part in item.get("summary", [])
+                                 if part.get("type") == "summary_text")
+        completion = "".join(text_parts)
+        finish_reason = response.get("incomplete_details") or response.get("status")
+        endpoint = "responses"
     else:
-        response = openai.Completion.create(**{"prompt": prompt,**raw_request})
-        completion = response["choices"][0]["text"]
+        raw_request.setdefault("temperature", temperature)
+        raw_request.setdefault("max_tokens", max_tokens_to_sample)
+        raw_request["stop"] = stops or None
+        if chat:
+            response = openai.ChatCompletion.create(messages=[{"role": "user", "content": prompt}], **raw_request)
+            choice = response["choices"][0]
+            completion = choice["message"]["content"]
+            endpoint = "chat/completions"
+        else:
+            response = openai.Completion.create(prompt=prompt, **raw_request)
+            choice = response["choices"][0]
+            completion = choice["text"]
+            endpoint = "completions"
+        finish_reason = choice.get("finish_reason")
+    metadata = {
+        "endpoint": endpoint, "response_id": response.get("id"),
+        "model": response.get("model", model), "usage": response.get("usage"),
+        "finish_reason": finish_reason, "reasoning_summaries": summaries,
+    }
+    # Log full returned text and usage even for an exhausted reasoning budget.
+    # Usage includes all generated tokens, including locally truncated text.
     if log_file is not None:
-        log_to_file(log_file, prompt, completion, model, max_tokens_to_sample)
+        log_to_file(log_file, prompt, completion or "", model, max_tokens_to_sample,
+                    api_metadata=metadata)
+    if not isinstance(completion, str) or not completion.strip():
+        raise LLMError(f"{model} returned no text (finish_reason={finish_reason}). "
+                       "For reasoning models, the completion-token budget includes reasoning tokens; "
+                       "increase that budget if finish_reason is length.")
+    if reasoning:
+        positions = [completion.find(stop) for stop in stops if stop and stop in completion]
+        if positions:
+            completion = completion[:min(positions)]
     return completion
 
 def complete_text(prompt, log_file, model, **kwargs):

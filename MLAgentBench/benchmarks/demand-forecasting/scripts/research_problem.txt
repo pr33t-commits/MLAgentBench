@@ -1,48 +1,145 @@
-Develop a demand forecasting solution that minimizes WMAPE for a fixed 13-week
-forecast at the SKU x store x week level. Read TASK.md for the data contract.
+# Goal
 
-train.csv contains historical weekly sales. validation.csv contains the next
-13 weeks with labels for model selection. test.csv contains the final 13 weeks'
-keys, with labels hidden. Missing sales rows are zero demand, and the provided
-panel is already completed. Preserve every SKU/store, even without item metadata.
+You are a demand forecasting specialist. Your goal is to establish and evaluate
+a forecasting baseline, then find a forecasting method that beats that baseline
+by the maximum margin on validation WMAPE within the available budget. Maximize
+the reduction in WMAPE relative to the baseline for a fixed-origin, 13-week
+forecast at the SKU x store x week level. Produce submission.csv and
+preserve your solution code. No model or training implementation is supplied.
+The target is observed sales units, used as the demand proxy; there are no
+labels for unmet demand during stockouts.
 
-For validation, use only sales before the first validation week and inventory
-strictly before that week. Do not use actual sales or inventory from within a
-forecast horizon to predict later weeks in the same horizon. After selecting a
-method, you may refit using train.csv plus validation.csv for the test forecast.
-inventory.csv is restricted to dates before the test forecast origin.
+# Data contract
 
-Before final submission, explore and compare different demand forecasting
-modeling families or philosophies. Use validation performance to select the
-final approach.
+All paths below are relative to your workspace.
 
-Create submission.csv in the workspace with exactly the columns
-sku,store,week,sales_units and exactly one finite, nonnegative prediction for
-every test.csv key. Decimal predictions are allowed. Do not modify provided data
-or evaluation helpers. Use only supplied data and files in your workspace.
+| File | Contents |
+| --- | --- |
+| train.csv | All labeled weekly history before test |
+| test.csv | Final 13 weeks, keys only; labels are hidden |
+| inventory.csv | Daily end-of-day stock, strictly before test origin |
+| item_master.csv | SKU to class/subcategory/category; some SKUs lack metadata |
+| location_master.csv | Store to city/country/region |
+| data_dictionary.json | Original column definitions |
+| task_metadata.json | Exact dates, row counts, assumptions, source hashes |
+| sample_submission.csv | Schema/key template; zeros are placeholders |
 
-The evaluator minimizes sum(abs(actual - prediction)) / sum(actual) over all
-individual SKU-store-week cells, including zero-demand cells. It does not first
-aggregate by product/store hierarchies or average per-series percentage errors.
-The score is a fraction (0.20 means 20%); lower is better. Leave your solution
-code and submission.csv in the workspace and submit a Final Answer when done.
+The sales panel is already a complete grid of source sales SKUs x source sales
+stores x Monday weeks. Missing source sales records mean zero demand, including
+leading, trailing, and internal gaps. Preserve every SKU/store, including those
+without item metadata. Left join metadata to retain all series. Do not fill
+missing inventory or master attributes with invented values. Static master
+attributes are assumed available at each forecast origin.
 
+# Validation and modeling
 
-Completeness contract:
-Produce and preserve BOTH a baseline test submission and a test submission from
-at least one changed modeling approach. First use Execute Experiment with
-role="baseline" and parent_submission_id="". Then use it with role="experiment"
-and parent_submission_id set to the accepted baseline execution_id. Repair and
-rerun rejected executions. Merely writing a script or describing an experiment
-does not count. Comment, filename, and random-seed-only changes do not qualify.
+Choose and explain your own validation methodology using train.csv, including
+splits, forecast origins, and evaluation windows. Use only observations available
+before each forecast origin for features and fitting. Held-out outcomes must not
+enter features or fitting. Do not use actual sales or inventory from within a
+forecast horizon to predict later weeks in that horizon. Calendar features and
+recursively predicted lags are allowed.
 
-Scripts must save their test predictions to:
+For final test predictions, all of train.csv and the provided inventory are
+available. You may refit using all of train.csv. Forecast all 13 test weeks from
+the test origin without observed outcomes inside that horizon.
+
+Your search space spans the full range of statistical and machine learning
+modeling approaches for demand forecasting. Explicitly build, evaluate, and
+register the baseline before exploring statistical and machine learning
+approaches. Choose methods based on observed demand patterns, data
+characteristics, and evidence from previous experiments.
+
+Evaluate candidate methods using the same leakage-safe validation protocol as
+the baseline. After each experiment, analyze its performance and use the
+findings to guide the next modeling hypothesis. An unsuccessful experiment is
+a reason to reconsider the approach and continue searching, not to finalize.
+Finding an improvement is also not a reason to stop: continue seeking a larger
+margin of improvement while sufficient budget remains and further experiments
+are feasible. Do not use hidden test performance for model selection.
+
+# Metric
+
+WMAPE = sum(abs(actual - prediction)) / sum(actual), evaluated directly over all
+SKU-store-week cells, including zero-demand cells. Lower is better. The score
+is a fraction (0.20 means 20%), not an unweighted average of per-series WMAPEs.
+Do not aggregate by product/store hierarchies before computing absolute errors.
+An all-zero actual evaluation set is undefined and rejected by the scorer.
+
+To score predictions against a labeled holdout you create from train.csv:
+
+    python evaluate.py holdout_actuals.csv holdout_predictions.csv
+
+# Submission contract
+
+Write submission.csv with exactly these columns, in this order:
+
+    sku,store,week,sales_units
+
+Include exactly one prediction for every test.csv key. Preserve ISO dates
+(YYYY-MM-DD). Row order does not matter. Duplicate, missing, extra, null,
+infinite, and negative predictions are rejected. Nonnegative decimal predictions
+are allowed. No hierarchy-level substitution is accepted.
+
+# Baseline and experiment registration
+
+Produce and preserve the baseline test submission and test submissions from
+the modeling approaches explored. Register them in separate executions:
+
+1. Call Execute Experiment with role="baseline" and parent_submission_id="".
+   Record the returned execution_id after the receipt is accepted.
+2. Call Execute Experiment for each changed approach with role="experiment"
+   and parent_submission_id set to that accepted baseline execution_id.
+   This field references the baseline execution ID, not its filename or a
+   manually invented label. Record each experiment's returned execution_id.
+3. Repair and rerun rejected executions. Writing a script or describing an
+   experiment does not count. Comment, filename, random-seed-only changes, or
+   copied predictions do not establish a changed modeling approach.
+
+Each execution receives a fresh output directory. Scripts must write their
+test predictions to:
+
     Path(os.environ["EXPERIMENT_OUTPUT_DIR"]) / "submission.csv"
-Import pathlib.Path and os as needed. Each execution receives a fresh output
-directory. Continue reading the supplied data from the workspace. The tool
-archives submissions, source/configuration snapshots, and execution receipts.
-Validation comparisons remain required; do not use hidden test performance.
-The experiment need not outperform the baseline. Select either accepted approach
-using validation performance, copy its predictions to workspace submission.csv,
-and leave solution code and a Final Answer as usual. Final model selection does
-not discard either registered submission.
+
+Import pathlib.Path and os as needed. Continue reading supplied data from the
+workspace. The tool archives submissions, source/configuration snapshots, and
+execution receipts. Use List Experiments to recover IDs and receipt status and
+Read Experiment Log with an execution_id to inspect execution logs.
+
+Preserve the best validated solution throughout the search. If the available
+budget is exhausted or a genuine blocker prevents further progress before an
+improvement is found, retain the baseline and report the outcome honestly.
+Select the best accepted approach using observed validation performance and
+copy its predictions to workspace submission.csv. Final selection does not
+discard registered baseline or experiment submissions.
+
+# Workspace rules and final artifacts
+
+You may create and edit your own solution code. Keep supplied data, metadata,
+and scoring helpers unchanged. Use only supplied data and files in the
+workspace; do not access source data or hidden evaluation files outside it.
+Leave solution code and the selected submission.csv in the workspace before
+submitting a Final Answer.
+
+# Final Answer format
+
+Use the following sections:
+
+## Validation
+Describe the split(s), forecast origin(s), evaluation window(s), leakage
+controls, and metric aggregation used for the comparison.
+
+## Baseline and experiments
+Provide a table with one row per registered execution and these columns:
+execution_id, role, parent_submission_id, approach/change, validation WMAPE,
+receipt status, submission path.
+Use the actual IDs returned by Execute Experiment. Leave the baseline parent
+empty and link each experiment to its baseline through parent_submission_id.
+Report observed validation scores only; mark unavailable scores explicitly.
+Distinguish acceptance of the submission format from validation performance.
+
+## Selected submission
+State the selected execution_id, why it was selected, its validation WMAPE,
+and whether it improved on the baseline. Link to workspace submission.csv and
+the solution script(s), and link preserved execution submissions when available.
+Report any unresolved failures or limitations honestly.

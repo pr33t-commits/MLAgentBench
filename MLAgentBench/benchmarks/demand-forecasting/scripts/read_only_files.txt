@@ -1,5 +1,4 @@
 *train.csv
-*validation.csv
 *test.csv
 *inventory.csv
 *item_master.csv
@@ -7,7 +6,6 @@
 *sample_submission.csv
 *data_dictionary.json
 *task_metadata.json
-*TASK.md
 *evaluate.py
 *metrics.py
 

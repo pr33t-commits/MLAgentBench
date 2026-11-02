@@ -82,7 +82,7 @@ def understand_file( file_name, things_to_look_for, work_dir = ".", **kwargs):
         return completion
 
 EDIT_SCRIPT_MODEL = "claude-v1"
-EDIT_SCRIPT_MAX_TOKENS = 4000
+EDIT_SCRIPT_MAX_TOKENS = 20000
 def _script_datasets(inputs, root, script_name):
     """Resolve selected entry names and build loading code before generation."""
     if not isinstance(inputs, dict):
@@ -125,12 +125,20 @@ def _script_datasets(inputs, root, script_name):
         if extension in (".csv", ".tsv"):
             try:
                 with open(resolved, encoding="utf-8-sig", newline="") as stream:
-                    header = next(csv.reader(stream, delimiter="\t" if extension == ".tsv" else ","))
+                    reader = csv.reader(stream, delimiter="\t" if extension == ".tsv" else ",")
+                    header = next(reader)
+                    sample_rows = []
+                    for _ in range(3):
+                        row = next(reader, None)
+                        if row is None:
+                            break
+                        sample_rows.append({key: value[:120] for key, value in zip(header[:12], row[:12])})
                 if not header or len(set(header)) != len(header) or any(not h for h in header):
                     raise ValueError("requires nonempty unique column names")
             except (OSError, UnicodeError, StopIteration, ValueError, csv.Error) as exc:
                 raise EnvException(f"Cannot read dataset header for {path}: {exc}") from exc
-            details.update(type="pandas.DataFrame", columns=header,
+            details.update(type="pandas.DataFrame", columns=header, sample_rows=sample_rows,
+                           sample_note="Raw strings; at most 3 rows, 12 columns and 120 characters per value. Not a full profile or inferred dtype.",
                            parsing="Header row; pandas type inference; dates remain strings unless explicitly converted")
         context.append(details)
     # Relative to __file__, so scripts in subdirectories work from any CWD and
@@ -159,8 +167,15 @@ for _alias, _relative in _DATASET_INPUTS.items():
     return json.dumps(context, indent=2), loader
 
 
-def create_script(datasets, objective, script_name, work_dir=".", research_problem="", **kwargs):
-    """Generate a new Python script without executing or replacing a file."""
+def create_script(datasets, objective, script_name, *, use_demand_engine=False,
+                  work_dir=".", research_problem="", **kwargs):
+    """Generate a script. The four Usage inputs are agent-controlled.
+
+    work_dir, research_problem and kwargs are injected runtime context, not
+    additional tool inputs for the agent to supply.
+    """
+    if not isinstance(use_demand_engine, bool):
+        raise EnvException("use_demand_engine must be a JSON boolean (true or false)")
     if not isinstance(objective, str) or not objective.strip():
         raise EnvException("objective must be a nonempty descriptive string")
     if not isinstance(script_name, str) or not script_name.endswith(".py") or os.path.isabs(script_name):
@@ -182,9 +197,19 @@ def create_script(datasets, objective, script_name, work_dir=".", research_probl
         raise EnvException("The script's parent directory must already exist")
     dataset_context, dataset_loader = _script_datasets(datasets, root, script_name)
 
+    feature_guide = ""
+    if use_demand_engine:
+        from .forecast_features import AGENT_GUIDE
+        feature_guide = AGENT_GUIDE
+    input_loading_note = (
+        "Pass loaded DATASETS DataFrames to demand_engine; it does not read files. "
+        "Specify transformations, grouping level, time column, frequency and source policies explicitly. "
+        "The input time column identifies target rows; build() takes no requests or origin. Retain original columns and select generated features explicitly."
+        if use_demand_engine else "")
     prompt = f"""Continue a Python script named {script_name} after the supplied loading block.
 Execution libraries:
 {kwargs.get("library_context", "Library availability is unverified.")}
+{feature_guide}
 Research problem:
 {research_problem}
 
@@ -212,10 +237,30 @@ data, or missing-file fallbacks. Perform any explicit date/dtype conversions and
 validation-origin filtering required by the objective after loading. The loader
 does not infer which columns are targets or which files are safe for fitting:
 respect the main agent's stated split roles and leakage constraints.
+{input_loading_note}
 
 The script will run from the agent's working directory. Use only files within
 that directory. Follow the objective's input schemas, output requirements, and
-constraints. Return the implementation AFTER the loading block, not a diff or placeholders, inside
+constraints. Implement only the requested stage.
+Do not expand a bounded stage into an entire pipeline. For forecasting, do not
+combine historical feature generation, model fitting and prediction in one script,
+and never combine baseline and improvement experiments. Feature scripts save
+features with retained input columns and key/schema/split metadata; keep the generated feature list separate from labels. Fit scripts consume saved features and
+save one model plus its ordered input columns/configuration. Prediction scripts
+load the saved model and features without retraining or rebuilding historical
+features, and write the requested submission. Recursive prediction may compute
+only necessary per-horizon feature updates within its prediction loop. A cheap
+non-fitting baseline may compute its rule and predictions together.
+Implement only the stage specified in the objective. If a forecasting objective
+requests multiple stages or experiments, return a script that raises ValueError
+with an actionable request for one stage, before expensive work; do not silently
+choose a subset or implement the entire pipeline. Print stage start/completion,
+elapsed time, shapes and artifact paths with flush=True. Honor explicit iteration
+and tuning limits; do not add model-family sweeps or automatic upstream reruns.
+Check variable definitions and aliases, target/prediction column collisions after
+joins, date parsing against observed values, and library calls against the supplied
+versions. Do not invent date encodings or hide errors with arbitrary fallbacks.
+Return the implementation AFTER the loading block, not a diff or placeholders, inside
 one fenced code block starting with ```python and ending with ```.
 """
     completion = complete_text(prompt, log_file=kwargs["log_file"],
@@ -340,12 +385,17 @@ def inspect_script_lines( script_name, start_line_number, end_line_number, work_
         end_line_number = int(end_line_number)
     except:
         raise EnvException("start_line_number and end_line_number must be integers")
-    if end_line_number - start_line_number > 100:
-        raise EnvException("the number of lines to display is limited to 100 lines")
+    if start_line_number < 1 or end_line_number < start_line_number:
+        raise EnvException("line numbers must be positive and end must not precede start")
     try:
         
-        # lines = open(os.path.join(work_dir,script_name)).readlines()
-        lines = read_file(script_name, work_dir = work_dir, **kwargs).split("\n")
+        if script_name == "@trusted/forecast_features.py":
+            # Inspection-only alias: never resolve this through the workspace.
+            with open(os.path.join(os.path.dirname(__file__), "forecast_features.py"),
+                      encoding="utf-8") as source:
+                lines = source.read().split("\n")
+        else:
+            lines = read_file(script_name, work_dir = work_dir, **kwargs).split("\n")
     except:
         raise EnvException(f"cannot find script {script_name}")
 
@@ -396,9 +446,9 @@ HIGH_LEVEL_ACTIONS =[
     ),
     ActionInfo(
         name="Inspect Script Lines",
-        description="Use this to inspect specific part of a python script precisely, or the full content of a short script. The number of lines to display is limited to 100 lines. This is especially helpful when debugging.",
+        description="Use this to inspect a specific part of a Python script precisely, or its full content. This is especially helpful when debugging.",
         usage={
-            "script_name": "a valid python script name with relative path to current directory if needed",
+            "script_name": "A workspace-relative Python script path, or @trusted/forecast_features.py to inspect the installed read-only demand_engine and feature utility source. The trusted alias is for inspection only; it does not enable editing or access to other host files.",
             "start_line_number": "a valid line number",
             "end_line_number": "a valid line number"
         },
@@ -407,17 +457,14 @@ HIGH_LEVEL_ACTIONS =[
     ),
     ActionInfo(
         name="Create Script (AI)",
-        description='''Create a new Python script from the selected datasets. Pass datasets as a JSON object mapping aliases to workspace filenames, not as text inside objective. Use {} for no inputs. The tool resolves files, reads actual headers, and supplies loading code; the coding LLM continues using DATASETS["alias"]. CSV/TSV inputs are pandas DataFrames and JSON inputs are decoded values. The coder has no tools or prior conversation. In objective, state file roles, target, joins, split/date restrictions, dtype requirements, and outputs. Select only files safe for this computation. Missing or ambiguous names fail; use one listed relative path when ambiguous. Supported formats are UTF-8 CSV, TSV, and JSON. The script is saved but not executed, and existing files are not overwritten.
+        description='''Create a new Python script from the selected datasets. Pass datasets as a JSON object mapping aliases to workspace filenames, not as text inside objective. Use {} for no inputs. The tool resolves files, reads actual headers, and supplies loading code; the coding LLM continues using DATASETS["alias"]. CSV/TSV inputs are pandas DataFrames and JSON inputs are decoded values. The coder has no tools or prior conversation. Make objective a self-contained implementation specification: state the algorithm and ordered steps, observed input types/date formats, dataset roles and target, join keys/cardinality and column names after joins, feature/label availability, validation protocol, library/API constraints, output paths/schema and acceptance checks. For forecasting, require one bounded stage per call: feature generation, model fitting, or prediction/submission. Baseline and improvement must be separate scripts and executions. Register the baseline before starting the improvement. Specify saved intermediate artifacts and producer/consumer contracts; run and validate each stage before requesting the next. Save reusable outputs and rerun only affected stages. For other small cohesive tasks, provide enough detail to implement every step without guessing. The coder cannot inspect previous scripts: include relevant interfaces and artifact formats. CSV/TSV/JSON intermediates can use datasets; describe other workspace artifact paths and their loading contract explicitly in objective, not in datasets. Select only files safe for this computation. Missing or ambiguous names fail; use one listed relative path when ambiguous. Supported formats are UTF-8 CSV, TSV, and JSON. The script is saved but not executed, and existing files are not overwritten.
 
-Exact response format example (plain labels, no Markdown bullets or quotes around the object):
-Action: Create Script (AI)
-Action Input: {"datasets": {"train": "train.csv", "validation": "validation.csv", "test": "test.csv"}, "objective": "Create a last-observed-sales baseline. Evaluate validation WMAPE using train only. Then use train plus validation to predict test. Save submission.csv with columns sku, store, week, sales_units.", "script_name": "baseline_forecast.py"}
-Do not embed a DATASETS declaration inside objective. End your response immediately after the closing brace of Action Input; do not emit Observation:.
 ''',
         usage={
             "datasets": 'A JSON object mapping aliases to workspace filenames, for example {"train": "train.csv", "items": "item_master.csv"}. Use {} for no inputs.',
-            "objective": "Plain-text instructions describing file roles, computations, leakage constraints, and outputs. The script receives loaded inputs as DATASETS[alias].",
-            "script_name": "a new Python script name ending in .py, relative to the working directory; its parent directory must exist"
+            "objective": "Self-contained specification of this script or bounded stage: algorithm, verified types/date formats, split and join rules, input/output artifact contracts, dependencies, validation checks, and rerun behavior. The script receives declared datasets as DATASETS[alias].",
+            "script_name": "a new Python script name ending in .py, relative to the working directory; its parent directory must exist",
+            "use_demand_engine": "JSON boolean, default false. Set true only when this script generates forecasting features for ML models using the pre-built demand_engine. Use false for inspection, plotting, non-ML baselines, or stages that only consume existing features. Only true supplies feature-engine usage examples to the coding LLM. Runtime arguments such as work_dir, research_problem and logging are supplied by the environment; do not include them."
         },
         return_value="The observation contains the saved script and its name. Invalid Python, invalid paths, read-only destinations, and existing files produce an error. Inspect the script before using Execute Script.",
         function=create_script

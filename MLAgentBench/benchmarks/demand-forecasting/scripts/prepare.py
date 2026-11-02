@@ -43,18 +43,17 @@ def prepare(source, output=BENCHMARK):
     if sales.empty or not sales.week.dt.dayofweek.eq(0).all():
         raise ValueError("Sales must contain Monday week starts")
     weeks = pd.date_range(sales.week.min(), sales.week.max(), freq="W-MON")
-    if len(weeks) <= 2 * HORIZON:
-        raise ValueError("Need more than 26 weeks for train/validation/test")
+    if len(weeks) <= HORIZON:
+        raise ValueError("Need more than 13 weeks for train/test")
     skus, stores = sorted(sales.sku.unique()), sorted(sales.store.unique())
     # The task defines missing sales rows as zero, including each series' gaps.
     panel = sales.set_index(KEYS).reindex(
         pd.MultiIndex.from_product([skus, stores, weeks], names=KEYS), fill_value=0
     ).reset_index().sort_values(["week", "sku", "store"]).reset_index(drop=True)
-    validation_start, test_start = weeks[-2 * HORIZON], weeks[-HORIZON]
-    train = panel[panel.week < validation_start]
-    validation = panel[(panel.week >= validation_start) & (panel.week < test_start)]
+    test_start = weeks[-HORIZON]
+    train = panel[panel.week < test_start]
     test = panel[panel.week >= test_start]
-    # Static master data is assumed known at both forecast origins. Missing master
+    # Static master data is assumed known at each forecast origin. Missing master
     # rows remain missing; agents must left join rather than drop these series.
     historical_inventory = inventory[inventory.date < test_start]
     manifest = {
@@ -66,10 +65,9 @@ def prepare(source, output=BENCHMARK):
         "missing_item_master_skus": sorted(set(skus) - set(items.sku)),
         "missing_location_master_stores": sorted(set(stores) - set(locations.store)),
         "inventory_exclusive_cutoff": test_start.strftime("%Y-%m-%d"),
-        "validation_inventory_exclusive_cutoff": validation_start.strftime("%Y-%m-%d"),
         "splits": {name: {"start": frame.week.min().strftime("%Y-%m-%d"),
                           "end": frame.week.max().strftime("%Y-%m-%d"), "rows": len(frame)}
-                   for name, frame in [("train", train), ("validation", validation), ("test", test)]},
+                   for name, frame in [("train", train), ("test", test)]},
         "source_sha256": {name: hashlib.sha256((source / name).read_bytes()).hexdigest()
                           for name in ["sales.csv", "inventory.csv", "item_master.csv",
                                        "location_master.csv", "data_dictionary.json"]},
@@ -77,7 +75,7 @@ def prepare(source, output=BENCHMARK):
     env, scripts = output / "env", output / "scripts"
     env.mkdir(parents=True, exist_ok=True)
     scripts.mkdir(parents=True, exist_ok=True)
-    for name, frame in [("train.csv", train), ("validation.csv", validation),
+    for name, frame in [("train.csv", train),
                         ("test.csv", test[KEYS]), ("inventory.csv", historical_inventory),
                         ("item_master.csv", items), ("location_master.csv", locations)]:
         frame.to_csv(env / name, index=False, date_format="%Y-%m-%d")
@@ -89,6 +87,14 @@ def prepare(source, output=BENCHMARK):
     (env / "task_metadata.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     shutil.copyfile(SCRIPTS / "scoring.py", env / "metrics.py")
     shutil.copyfile(SCRIPTS.parents[2] / "submission_validation.py", env / "submission_validation.py")
+    # Import the trusted helper by path so standalone task preparation stays portable.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("preparation_lineage", SCRIPTS.parents[2] / "provenance.py")
+    lineage = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lineage)
+    lineage.archive_preparation(source, env, [SCRIPTS / "prepare.py", SCRIPTS / "scoring.py",
+                                             SCRIPTS.parents[2] / "submission_validation.py"],
+                                scripts / "preparation_provenance", manifest["source_sha256"])
     return manifest
 
 

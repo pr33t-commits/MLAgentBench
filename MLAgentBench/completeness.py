@@ -5,6 +5,7 @@ cooperative benchmark, not isolation against arbitrary hostile Python code.
 """
 import argparse
 import hashlib
+from .execution_runtime import run_script
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import time
 import uuid
 
 from .submission_validation import validate_submission
+from .provenance import execution_command
 
 
 def digest(path):
@@ -35,8 +37,55 @@ def inside(root, name):
     return path
 
 
+def read_experiment_log(receipt_dir, execution_id, stream, offset=0, limit=16000):
+    """Read a bounded byte page from an archived execution, never arbitrary files."""
+    if stream not in {"stdout", "stderr"}:
+        raise ValueError("stream must be stdout or stderr")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ValueError("offset must be a nonnegative byte offset")
+    if not isinstance(limit, int) or not 1 <= limit <= 32000:
+        raise ValueError("limit must be between 1 and 32000 bytes")
+    if not isinstance(execution_id, str) or not execution_id.startswith("exec_") or not execution_id[5:].isalnum():
+        raise ValueError("Use an execution_id returned by Execute Experiment or List Experiments")
+    root = Path(receipt_dir).resolve()
+    path = inside(root, execution_id + "/" + stream + ".txt")
+    total = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        raw = handle.read(limit)
+    return {"execution_id": execution_id, "stream": stream,
+            "text": raw.decode("utf-8", errors="replace"), "offset": offset,
+            "next_offset": offset + len(raw) if offset + len(raw) < total else None,
+            "total_bytes": total}
+
+
+def list_experiments(receipt_dir):
+    records = []
+    for path in sorted(Path(receipt_dir).glob("exec_*/receipt.json")):
+        r = json.loads(path.read_text(encoding="utf-8"))
+        records.append({key: r.get(key) for key in
+                        ("execution_id", "role", "script_name", "parent_submission_id",
+                         "accepted", "status", "exit_code", "started_at")})
+    return sorted(records, key=lambda r: r.get("started_at") or 0)
+
+
+def execution_output(archive, stream, limit=16000):
+    """Keep ordinary tracebacks whole; retain the tail of unusually long logs."""
+    path = archive / (stream + ".txt")
+    if not path.exists():
+        return {"text": "", "total_bytes": 0, "truncated": False, "offset": 0}
+    total = path.stat().st_size
+    offset = max(0, total - limit)
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        raw = handle.read(limit)
+    return {"text": raw.decode("utf-8", errors="replace"), "total_bytes": total,
+            "truncated": offset > 0, "offset": offset}
+
+
 def execute_experiment(script_name, role, parent_submission_id, work_dir,
-                       receipt_dir, python, timeout=600, device=""):
+                       receipt_dir, python, timeout=600, device="",
+                       provenance_log=None, provenance_dir=None, protected_features=False, session_deadline=None):
     if role not in {"baseline", "experiment"}:
         raise ValueError("role must be baseline or experiment")
     work, root = Path(work_dir).resolve(), Path(receipt_dir).resolve()
@@ -87,22 +136,16 @@ def execute_experiment(script_name, role, parent_submission_id, work_dir,
                "started_at": time.time(), "finished_at": None, "exit_code": None,
                "accepted": False, "status": "running"}
     write_json(archive / "receipt.json", receipt)
-    env = dict(os.environ, EXPERIMENT_OUTPUT_DIR=str(output), CUDA_VISIBLE_DEVICES=str(device))
+    command, env = execution_command(python, script, work, provenance_log, provenance_dir,
+                                     protected_features=protected_features)
+    env.update(EXPERIMENT_OUTPUT_DIR=str(output), CUDA_VISIBLE_DEVICES=str(device))
     try:
-        with (archive / "stdout.txt").open("wb") as stdout, (archive / "stderr.txt").open("wb") as stderr:
-            process = subprocess.Popen([python, "-u", str(script)], cwd=work, env=env,
-                                       stdout=stdout, stderr=stderr,
-                                       start_new_session=(os.name != "nt"))
-            try:
-                receipt["exit_code"] = process.wait(timeout=timeout)
-            except BaseException:
-                if os.name == "nt":
-                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True)
-                else:
-                    import signal
-                    os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                raise
+        result = run_script(command, work, env, timeout=timeout, session_deadline=session_deadline)
+        (archive / "stdout.txt").write_text(result.pop("stdout"), encoding="utf-8")
+        (archive / "stderr.txt").write_text(result.pop("stderr"), encoding="utf-8")
+        receipt.update(result)
+        if result["timed_out"]:
+            raise subprocess.TimeoutExpired(command, min(timeout, 600), output=result["feedback"])
         if receipt["exit_code"] != 0:
             raise ValueError("Script exited unsuccessfully")
         prediction = output / "submission.csv"
@@ -114,9 +157,13 @@ def execute_experiment(script_name, role, parent_submission_id, work_dir,
         receipt["artifact_sha256"] = digest(archive / "submission.csv")
         receipt.update(accepted=True, status="accepted")
     except Exception as exc:
-        receipt.update(status="rejected", error=f"{type(exc).__name__}: {exc}")
+        receipt.update(status="rejected", error=f"{type(exc).__name__}: {exc}" + ("; " + receipt["feedback"] if receipt.get("feedback") else ""))
     finally:
         receipt["finished_at"] = time.time()
+        receipt["stdout"] = execution_output(archive, "stdout")
+        receipt["stderr"] = execution_output(archive, "stderr")
+        receipt["output_directory"] = output.relative_to(work).as_posix()
+        receipt["log_help"] = "Read Experiment Log retrieves full stdout/stderr in byte pages using this execution_id."
         if receipt["status"] == "running":
             receipt["status"] = "interrupted"
         write_json(archive / "receipt.json", receipt)

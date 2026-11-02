@@ -27,7 +27,7 @@ class ActionInputTests(unittest.TestCase):
             Agent.parse_entries(response, ["Reflection", "Research Plan and Status", "Fact Check", "Thought", "Action", "Action Input"])
 
     def test_fenced_dataset_mapping_preserves_escaping(self):
-        expected = {"datasets": {"train": "train.csv", "validation": "validation.csv"},
+        expected = {"datasets": {"train": "train.csv", "test": "test.csv"},
                     "objective": "Analyze sales",
                     "script_name": "eda_sales.py"}
         info = SimpleNamespace(usage={key: "" for key in expected})

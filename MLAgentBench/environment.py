@@ -22,6 +22,7 @@ from .schema import Step, Trace, EnvException, TooLongPromptError, LLMError, Enh
 from .LLM import complete_text_claude
 from .prepare_task import prepare_task, get_task_info
 from .library_context import build_library_context
+from .provenance import Provenance
 
 class TimeoutException(Exception): pass
 
@@ -82,20 +83,30 @@ class Environment:
             shutil.copyfile(os.path.join(self.work_dir, "test.csv"),
                             os.path.join(receipt_dir, "test_keys.csv"))
         else:
-            del self._action_infos["Execute Experiment"]
+            for name in ("Execute Experiment", "Read Experiment Log", "List Experiments"):
+                del self._action_infos[name]
 
         self.library_context = build_library_context(args.python)
+        coding_research_problem = self.research_problem
+        if receipt_dir:
+            from .forecast_features import MAIN_AGENT_GUIDE
+            self._research_problem += "\n\n" + MAIN_AGENT_GUIDE
         self._static_kwargs_for_tools = {
             "receipt_dir": receipt_dir,
+            "protected_features": receipt_dir is not None,
             "library_context": self.library_context,
             "device": args.device,
             "python": args.python,
             "work_dir": self.work_dir,
             "args": args,
             "read_only_files": self.read_only_files,
-            "research_problem": self.research_problem,
+            "research_problem": coding_research_problem,
         }
         self._trace = self._initialize_trace()
+        self._provenance = Provenance(self.work_dir, os.path.join(self.log_dir, "provenance"),
+                                      resumed=bool(getattr(args, "resume", None)),
+                                      preparation_dir=os.path.join(os.path.dirname(__file__), "benchmarks",
+                                                                   args.task, "scripts", "preparation_provenance")) if receipt_dir else None
         self._start_time = time.time()
 
     ############################## getters ########################################
@@ -197,10 +208,9 @@ class Environment:
         os.mkdir(os.path.join(work_dir, "backup"))
 
         if self.args.resume:
-            shutil.rmtree(work_dir)
             resume_dir = os.path.join(self.args.resume, "env_log", "traces" , f"step_{self.args.resume_step}_files")
-            print("Restoring workspace ing from {}".format(resume_dir))
-            shutil.copytree(resume_dir, work_dir, symlinks=True)
+            print("Restoring workspace from {}".format(resume_dir))
+            shutil.copytree(resume_dir, work_dir, symlinks=True, dirs_exist_ok=True)
             if not os.path.exists(os.path.join(work_dir, "backup")):
                 os.mkdir(os.path.join(work_dir, "backup"))
 
@@ -265,6 +275,7 @@ class Environment:
         def signal_handler(signum, frame):
             raise TimeoutException("Timed out!")
         signal.signal(signal.SIGALRM, signal_handler)
+        self._static_kwargs_for_tools["session_deadline"] = time.time() + self.args.max_time
         signal.alarm(self.args.max_time)
         return self
     
@@ -298,6 +309,21 @@ class Environment:
         return curr_step >= self.args.max_steps or any_final_answer or time.time() - self.start_time > self.args.max_time
 
     def execute(self, action):
+        if not self._provenance:
+            return self._execute(action)
+        access_log = self._provenance.begin(len(self._trace.steps), action.name, action.args)
+        self._static_kwargs_for_tools.update(provenance_log=access_log,
+                                            provenance_dir=str(self._provenance.root))
+        observation = None
+        try:
+            observation = self._execute(action)
+            return observation
+        finally:
+            self._provenance.finish(self._static_kwargs_for_tools.get("receipt_dir"), observation)
+            self._static_kwargs_for_tools.pop("provenance_log", None)
+            self._static_kwargs_for_tools.pop("provenance_dir", None)
+
+    def _execute(self, action):
         """Execute an action and return the observation."""
         
         trace = self._trace
@@ -331,7 +357,7 @@ class Environment:
                 except TooLongPromptError:
                     observation="EnvError: too long input for the tool"
                 except LLMError as e:
-                    observation = "LLMError: " + e.message
+                    observation = "LLMError: " + str(e)
                 except EnvException as e:
                     observation = "EnvError: " + e.message
                 except TypeError as e:

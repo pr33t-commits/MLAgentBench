@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from MLAgentBench.completeness import execute_experiment, evaluate, judge_pending
+from MLAgentBench.completeness import (execute_experiment, evaluate, judge_pending,
+                                      read_experiment_log, list_experiments)
 from MLAgentBench.submission_validation import validate_submission
 
 
@@ -58,6 +59,43 @@ class CompletenessTests(unittest.TestCase):
         self.script.write_text("print('no predictions')")
         self.assertFalse(self.run_model()["accepted"])
         self.assertEqual(evaluate(self.receipts)["completeness_score"], 0)
+
+    def test_failure_returns_traceback_and_success_returns_metrics(self):
+        self.script.write_text("print('loaded input', flush=True)\nraise ValueError('bad date encoding')")
+        receipt = self.run_model()
+        self.assertIn("loaded input", receipt["stdout"]["text"])
+        self.assertIn("Traceback (most recent call last)", receipt["stderr"]["text"])
+        self.assertIn("ValueError: bad date encoding", receipt["stderr"]["text"])
+        self.assertFalse(receipt["stderr"]["truncated"])
+        self.assertIn('line 2', receipt["stderr"]["text"])
+        self.script.write_text("import os\nfrom pathlib import Path\n"
+                              "(Path(os.environ['EXPERIMENT_OUTPUT_DIR'])/'submission.csv').write_text("
+                              + repr(self.csv) + ")\nprint('Validation WMAPE: 0.25')")
+        success = self.run_model()
+        self.assertTrue(success["accepted"])
+        self.assertIn("Validation WMAPE: 0.25", success["stdout"]["text"])
+        records = list_experiments(self.receipts)
+        self.assertEqual([r["accepted"] for r in records], [False, True])
+        self.assertEqual(records[-1]["execution_id"], success["execution_id"])
+
+    def test_large_log_can_be_retrieved_without_losing_traceback(self):
+        self.script.write_text("import sys\nprint('x'*40000, file=sys.stderr)\nraise RuntimeError('last error')")
+        receipt = self.run_model()
+        self.assertTrue(receipt["stderr"]["truncated"])
+        self.assertIn("RuntimeError: last error", receipt["stderr"]["text"])
+        offset, chunks = 0, []
+        while offset is not None:
+            page = read_experiment_log(self.receipts, receipt["execution_id"], "stderr", offset)
+            chunks.append(page["text"])
+            offset = page["next_offset"]
+        archived = (self.receipts / receipt["execution_id"] / "stderr.txt").read_bytes().decode()
+        self.assertEqual("".join(chunks), archived)
+        with self.assertRaises(ValueError):
+            read_experiment_log(self.receipts, "../../escape", "stderr")
+        with self.assertRaises(ValueError):
+            read_experiment_log(self.receipts, receipt["execution_id"], "../receipt")
+        with self.assertRaises(ValueError):
+            read_experiment_log(self.receipts, receipt["execution_id"], "stdout", -1)
 
     def test_tampering_invalidates_archived_submission(self):
         receipt = self.run_model()

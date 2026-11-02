@@ -66,7 +66,11 @@ class PreparationTests(unittest.TestCase):
             manifest = preparation.prepare(source, output)
             self.assertEqual(manifest["zero_filled_rows"], 1)
             self.assertEqual(manifest["missing_item_master_skus"], ["a"])
-            self.assertEqual([manifest["splits"][s]["rows"] for s in ["train", "validation", "test"]], [4, 13, 13])
+            self.assertEqual([manifest["splits"][s]["rows"] for s in ["train", "test"]], [17, 13])
+            self.assertEqual(set(manifest["splits"]), {"train", "test"})
+            self.assertEqual({p.name for p in (output / "env").glob("*.csv")},
+                             {"train.csv", "test.csv", "inventory.csv", "item_master.csv",
+                              "location_master.csv", "sample_submission.csv"})
             train = pd.read_csv(output / "env/train.csv")
             self.assertEqual(train.iloc[2].sales_units, 0)
             self.assertEqual(pd.read_csv(output / "env/inventory.csv").stock_units.tolist(), [5])
