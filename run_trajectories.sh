@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Run independent trajectories sequentially against an already running model server.
-# Usage: MODEL=gpt-qwen-local bash run_trajectories.sh [trajectory_count]
+# Run independent trajectories with local Hugging Face planning and API helpers.
+# Requires CUDA-enabled PyTorch and OPENAI_API_KEY for the GPT helpers.
+# Usage: bash run_trajectories.sh [trajectory_count]
 set -uo pipefail
 
 N="${1:-5}"
-MODEL="${MODEL:-gpt-qwen-local}"
+MODEL="${MODEL:-huggingface/Qwen/Qwen3.5-4B}"
+HELPER_MODEL="${HELPER_MODEL:-gpt-5-nano}"
 PYTHON="$(command -v python)" || exit 1
 
 [[ "$N" =~ ^[1-9][0-9]*$ ]] || {
@@ -31,8 +33,8 @@ CONFIG=(
   --agent-type ResearchAgent
   --device 0
   --llm-name "$MODEL"
-  --edit-script-llm-name "$MODEL"
-  --fast-llm-name "$MODEL"
+  --edit-script-llm-name "$HELPER_MODEL"
+  --fast-llm-name "$HELPER_MODEL"
   --max-steps 50
   --agent-max-steps 35
   --max-retries 3

@@ -4,7 +4,7 @@ import os
 from functools import partial
 import tiktoken
 from .schema import TooLongPromptError, LLMError
-import load_dotenv
+import dotenv as load_dotenv
 load_dotenv.load_dotenv()
 
 enc = tiktoken.get_encoding("cl100k_base")
@@ -52,7 +52,7 @@ except Exception as e:
     print(e)
     print("Could not load VertexAI API.")
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers import StoppingCriteria, StoppingCriteriaList
 import torch
 
@@ -120,8 +120,15 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
     else:
         tokenizer = AutoTokenizer.from_pretrained(model)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.float16 if device == "cuda" else torch.float32
-        hf_model = AutoModelForCausalLM.from_pretrained(model, torch_dtype=dtype).to(device)
+        dtype = (torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16) if device == "cuda" else torch.float32
+        config = AutoConfig.from_pretrained(model)
+        model_cls = AutoModelForCausalLM
+        if config.model_type == "qwen3_5":
+            # This HF checkpoint has a conditional-generation config, even
+            # when the agent supplies text only.
+            from transformers import AutoModelForImageTextToText
+            model_cls = AutoModelForImageTextToText
+        hf_model = model_cls.from_pretrained(model, torch_dtype=dtype).to(device)
         hf_model.eval()
         loaded_hf_models[model] = (hf_model, tokenizer)
 
@@ -146,7 +153,7 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
         max_new_tokens=max_tokens_to_sample,
         do_sample=True,
         return_dict_in_generate=True,
-        output_scores=True,
+        output_scores=False,
         stopping_criteria = stopping_criteria,
         **kwargs,
     )
