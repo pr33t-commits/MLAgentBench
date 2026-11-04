@@ -49,6 +49,10 @@ class Environment:
         self._args = args
         self._log_dir = os.path.join(args.log_dir, "env_log")
         self._setup_log_dir()
+        with open(os.path.join(self.log_dir, "execution_mode.json"), "w") as stream:
+            json.dump({"mode": "unsandboxed", "filesystem_isolation": False,
+                       "description": "Generated scripts run with the runner user's permissions."},
+                      stream, indent=2)
 
         if not args.interactive:
             self._benchmark_folder_name, self._research_problem = get_task_info(args.task)

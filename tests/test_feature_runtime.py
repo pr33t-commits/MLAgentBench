@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -9,9 +8,8 @@ import unittest
 from MLAgentBench.provenance import Provenance, execution_command
 
 
-@unittest.skipUnless(sys.platform == 'linux' and shutil.which('bwrap'), 'Linux bubblewrap required')
-class ProtectedRuntimeTests(unittest.TestCase):
-    def test_read_only_library_and_lineage(self):
+class UnsandboxedRuntimeTests(unittest.TestCase):
+    def test_ordinary_filesystem_access_and_feature_lineage(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             work = root / 'work'
@@ -20,17 +18,13 @@ class ProtectedRuntimeTests(unittest.TestCase):
             # A local module with the same name must not shadow the supplied one.
             (work / 'forecast_features.py').write_text("raise RuntimeError('shadowed')")
             script = work / 'run.py'
-            script.write_text('''import errno
+            script.write_text('''
 from pathlib import Path
 import pandas as pd
 import forecast_features as ff
-try:
-    with open(ff.__file__, 'a') as handle:
-        handle.write('# altered')
-except OSError as exc:
-    assert exc.errno in (errno.EROFS, errno.EACCES), exc
-else:
-    raise AssertionError('utility was writable')
+# A normal process may write outside cwd when its OS user has permission.
+outside = Path.cwd().parent / 'outside_workspace.txt'
+outside.write_text('ordinary Python execution')
 engine = ff.demand_engine(pd.read_csv('input.csv'), {'value': {'lag': 'lag'}},
                           level=['series'], time_column='time', frequency='7D')
 result = engine.build(mode='recursive')
@@ -41,8 +35,12 @@ result.save('features.csv')
             tracker = Provenance(work, root / 'provenance')
             log = tracker.begin(0, 'Execute Script', {'script_name': 'run.py'})
             cmd, env = execution_command(sys.executable, script, work, log, tracker.root, protected_features=True)
+            self.assertEqual(cmd[0], sys.executable)
+            self.assertNotIn('bwrap', cmd)
+            self.assertEqual(env['MLAB_EXECUTION_MODE'], 'unsandboxed')
             completed = subprocess.run(cmd, cwd=work, env=env, text=True, capture_output=True, timeout=60)
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual((root / 'outside_workspace.txt').read_text(), 'ordinary Python execution')
             tracker.finish()
             graph = json.loads(tracker.file.read_text())
             output = graph['nodes'][graph['current']['features.csv']]

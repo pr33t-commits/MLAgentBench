@@ -53,6 +53,15 @@ class RunnerMetricsTests(unittest.TestCase):
             benchmark_folder_name="demand-forecasting",
             args=types.SimpleNamespace(task="demand-forecasting"),
             log_dir=str(self.receipts.parent), work_dir=str(self.work))
+        # A fresh checkout has no generated task metadata. Supply it explicitly
+        # instead of relying on a previously prepared benchmark in the repo.
+        metadata_dir = self.root / 'benchmarks/demand-forecasting/env'
+        metadata_dir.mkdir(parents=True)
+        (metadata_dir / 'task_metadata.json').write_text(json.dumps({
+            'metric': 'WMAPE', 'metric_direction': 'minimize', 'metric_scale': 'fraction'}))
+        location = patch.object(self.runner, '__file__', str(self.root / 'runner.py'))
+        location.start()
+        self.addCleanup(location.stop)
         # Use the actual task evaluator, with only its hidden labels replaced.
         scorer_dir = self.root / "scorer"
         scorer_dir.mkdir()

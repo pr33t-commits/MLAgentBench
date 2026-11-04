@@ -20,9 +20,15 @@ def save(path, value):
 
 def execution_command(python, script, work_dir, provenance_log=None, provenance_dir=None,
                       protected_features=False):
+    """Build an ordinary Python subprocess command, with optional auditing.
+
+    On this branch protected_features is a legacy name for feature-engine
+    bootstrapping only. It does not enable filesystem or namespace isolation.
+    """
     env = dict(os.environ)
+    env["MLAB_EXECUTION_MODE"] = "unsandboxed"
     if protected_features and (not provenance_log or not provenance_dir):
-        raise ValueError("Protected feature execution requires provenance recording")
+        raise ValueError("Feature-engine execution requires provenance recording")
     if not provenance_log or not provenance_dir:
         return [python, "-u", str(script)], env
     env.update(MLAB_PROVENANCE_WORKSPACE=str(Path(work_dir).resolve()),
@@ -30,23 +36,11 @@ def execution_command(python, script, work_dir, provenance_log=None, provenance_
                MLAB_PROVENANCE_OBJECTS=str(Path(provenance_dir).resolve() / "objects"))
     command = [python, "-u", str(Path(__file__).with_name("provenance_runner.py")), str(script)]
     if protected_features:
-        bwrap = shutil.which("bwrap")
-        if not bwrap or os.name != "posix":
-            raise RuntimeError("Protected forecasting requires Linux bubblewrap; no unprotected fallback")
         work = Path(work_dir).resolve()
-        utility = Path(__file__).with_name("forecast_features.py").resolve()
-        if utility.is_relative_to(work):
-            raise ValueError("Trusted utility must be outside the writable workspace")
         audit = work / ".feature_audit"
         audit.mkdir(exist_ok=True)
         env.update(MLAB_FEATURE_ENGINE="1", MLAB_FEATURE_AUDIT_DIR=str(audit),
                    PYTHONDONTWRITEBYTECODE="1")
-        command = [bwrap, "--die-with-parent", "--ro-bind", "/", "/",
-                   "--tmpfs", "/tmp", "--bind", str(work), str(work),
-                   "--proc", "/proc", "--dev", "/dev"] + [
-                   arg for path in (Path(provenance_dir).resolve() / "objects",
-                                    Path(provenance_log).resolve().parent)
-                   for arg in ("--bind", str(path), str(path))] + ["--"] + command
     return command, env
 
 
