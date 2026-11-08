@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import uuid
 
 from MLAgentBench.research_context import build_messages, fit_messages, flatten_messages
-from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response
+from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response, commentary_text
 
 
 def step(number=0):
@@ -82,6 +82,7 @@ class ResearchLoopTests(unittest.TestCase):
                        build_messages=build_messages, flatten_messages=flatten_messages,
                        uses_native_tools=uses_native_tools, tool_definitions=tool_definitions,
                        tool_alias=tool_alias, parse_tool_response=parse_tool_response,
+                       commentary_text=commentary_text,
                        Action=lambda name, arguments: SimpleNamespace(name=name, arguments=arguments))
         exec(compile(ast.Module(body=[base], type_ignores=[]), str(root / "agent.py"), 'exec'), self.ns)
         tree = ast.parse((root / "agent_research.py").read_text())
@@ -185,7 +186,7 @@ class ResearchLoopTests(unittest.TestCase):
         self.assertNotIn('Stop after Action Input.', self.agent.system_prompt)
         self.assertNotIn('forecast sales', self.agent.system_prompt)
         self.assertIn('forecast sales', self.agent.task_prompt)
-        good = ('Research Plan and Status: verified plan\nThought: inspect\n'
+        good = ('DISCARDED PREFIX\nResearch Plan and Status: verified plan\nThought: inspect\n'
                 '<tool_call><function=execute_script><parameter=script_name>run.py</parameter>'
                 '</function></tool_call>')
         self.responses = ['malformed duplicate\nAction: Run\nAction: Run', good, good]
@@ -197,6 +198,7 @@ class ResearchLoopTests(unittest.TestCase):
         self.assertIn('No tool executed', retry[-1]['content'])
         assistant = self.prompts[2][-2]
         self.assertNotIn('<tool_call>', assistant['content'])
+        self.assertNotIn('DISCARDED PREFIX', assistant['content'])
         self.assertNotIn('Action:', assistant['content'])
         self.assertEqual(len(assistant['tool_calls']), 1)
         self.assertEqual(assistant['tool_calls'][0]['function']['name'], 'execute_script')
@@ -213,6 +215,26 @@ class ResearchLoopTests(unittest.TestCase):
         self.assertNotIn('tool_calls', self.prompts[1][-2])
         self.agent.summarize_observation.assert_not_called()
         self.assertEqual(len(self.agent.history_steps[1]['observation']), 5100)
+
+    def test_final_answer_executes_only_after_complete_native_response(self):
+        self.agent.native_tools = True
+        self.agent.args.retrieval = False
+        self.agent.all_tool_names = self.agent.prompt_tool_names = ['Final Answer']
+        self.agent.action_infos = {'Final Answer': SimpleNamespace(
+            description='Finish', usage={'final_answer': 'Complete answer'})}
+        self.agent.native_tool_definitions = tool_definitions(self.agent.prompt_tool_names, self.agent.action_infos)
+        partial = ('Research Plan and Status: verified\nThought: finish\n'
+                   '<tool_call><function=final_answer><parameter=final_answer>Complete report')
+        complete = partial + '</parameter></function></tool_call>'
+        self.responses = [partial, complete]
+        submitted = []
+        self.env.is_final = lambda: bool(submitted)
+        self.env.execute = lambda action: submitted.append(action) or 'end'
+        result = self.agent.run(self.env)
+        self.assertEqual(result, 'Finished due to env.is_final() == True')
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0].arguments, {'final_answer': 'Complete report'})
+        self.assertEqual(len(self.prompts), 2)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 """Build attributed research context without loading inference clients."""
 import json
-from .qwen_tools import tool_alias
+from .qwen_tools import tool_alias, commentary_text
 
 
 def build_messages(system, task, history, last_steps, last_observations,
@@ -33,12 +33,7 @@ def build_messages(system, task, history, last_steps, last_observations,
         if native_tools:
             # Only validated commentary goes back to the model. Keep raw output
             # exclusively in the audit record, not as another serialized call.
-            content = step.get("assistant_content")
-            if content is None:
-                content = "\n".join(f"{k}: {v}" for k, v in entries.items()
-                                    if k not in ("Action", "Action Input"))
-                if any(tag in content for tag in ("<tool_call>", "<think>", "</think>", "<|im_")):
-                    content = "[Legacy commentary omitted because it contains protocol artifacts.]"
+            content = commentary_text(entries)
             assistant = {"role": "assistant", "content": content, "reasoning_content": ""}
         if valid_call:
             assistant["tool_calls"] = [{"id": call_id, "type": "function", "function": {

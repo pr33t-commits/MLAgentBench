@@ -168,7 +168,7 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
                                   return_token_type_ids=False, add_special_tokens=False)
     stopping_criteria = StoppingCriteriaList()
     if tools is not None:
-        stopping_criteria.append(ToolCallStop(tokenizer, len(encoded_input.input_ids[0])))
+        stopping_criteria.append(ToolCallStop(tokenizer, len(encoded_input.input_ids[0]), tools))
     for stop_sequence_input_ids in stop_sequence_ids.input_ids:
         stopping_criteria.append(StopAtSpecificTokenCriteria(stop_sequence=stop_sequence_input_ids))
 

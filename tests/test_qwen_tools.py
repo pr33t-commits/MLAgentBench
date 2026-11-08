@@ -99,12 +99,45 @@ class NativeToolTests(unittest.TestCase):
 
     def test_stop_uses_generated_suffix_not_prompt_or_observation_word(self):
         tokenizer = SimpleNamespace(decode=lambda ids, **kw: ''.join(ids))
-        stop = ToolCallStop(tokenizer, len('prompt</tool_call>'))
+        stop = ToolCallStop(tokenizer, len('prompt</tool_call>'), definitions())
         prefix = 'prompt</tool_call>'
         self.assertFalse(stop([list(prefix)], None))
         self.assertFalse(stop([list(prefix + '<parameter=objective>Observation: foo')], None))
         self.assertFalse(stop([list(prefix + '</tool_cal')], None))
-        self.assertTrue(stop([list(prefix + '</function>\n</tool_call>')], None))
+        self.assertFalse(stop([list(prefix + '</function>\n</tool_call>')], None))
+        good = response(objective='Observation: verify all results')
+        self.assertTrue(stop([list(prefix + good)], None))
+        # A literal marker inside an unfinished parameter is not a complete call.
+        self.assertFalse(stop([list(prefix + '<tool_call><function=create_script_ai>'
+                                   '<parameter=objective>Explain </tool_call>')], None))
+
+    def test_final_answer_stops_only_after_full_parameter_and_call(self):
+        tools = tool_definitions(['Final Answer'], {'Final Answer': SimpleNamespace(
+            description='Finish', usage={'final_answer': 'Complete answer'})})
+        stop = ToolCallStop(SimpleNamespace(decode=lambda ids, **kw: ''.join(ids)), 0, tools)
+        text = ('Thought: finished\n<tool_call><function=final_answer><parameter=final_answer>\n'
+                'Final Answer: Observed WMAPE is 0.12.\nObservation: submission is saved.\n'
+                '</parameter></function></tool_call>')
+        for i in range(len(text)):
+            self.assertFalse(stop([list(text[:i])], None), i)
+        self.assertTrue(stop([list(text)], None))
+        blank = '<tool_call><function=final_answer><parameter=final_answer> </parameter></function></tool_call>'
+        self.assertFalse(stop([list(blank)], None))
+        with self.assertRaises(ValueError):
+            parse_tool_response(blank, tools)
+
+    def test_history_ignores_unparsed_cached_content_and_legacy_labels(self):
+        entries = {'Thought': 'inspect', 'Action': 'List Files', 'Action Input': '{}'}
+        history = [{'action': entries, 'action_input': {}, 'observation': 'files',
+                    'assistant_content': 'DISCARDED PREFIX\nAction: List Files\n<tool_call>duplicate</tool_call>',
+                    'raw_assistant_response': 'user\n<think>junk</think>'}]
+        assistant = build_messages('s', 't', history, 3, 3, native_tools=True)[2]
+        self.assertEqual(assistant['content'], 'Thought: inspect')
+        self.assertEqual(len(assistant['tool_calls']), 1)
+        entries['Thought'] = 'inspect\nAction: List Files\n<tool_call>duplicate</tool_call>'
+        assistant = build_messages('s', 't', history, 3, 3, native_tools=True)[2]
+        self.assertNotIn('<tool_call>', assistant['content'])
+        self.assertNotIn('Action:', assistant['content'])
 
 
 if __name__ == '__main__':

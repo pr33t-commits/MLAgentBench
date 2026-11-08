@@ -12,6 +12,20 @@ def tool_alias(name):
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
+def commentary_text(entries):
+    """Replay parsed commentary only, never raw prefixes or trailing protocols."""
+    fields = ("Reflection", "Research Plan and Status", "Fact Check", "Thought")
+    parts = []
+    for field in fields:
+        if field not in entries:
+            continue
+        value = entries[field].strip()
+        if re.search(r"<\|im_|</?(?:think|tool_call|tool_response)>|(?m:^[ \t]*Action(?: Input)?:)", value):
+            value = "[Historical field omitted because it contains protocol artifacts.]"
+        parts.append(f"{field}: {value}")
+    return "\n\n".join(parts)
+
+
 def tool_definitions(names, infos):
     tools = []
     aliases = set()
@@ -120,16 +134,25 @@ def parse_tool_response(text, tools):
     for key, spec in schema["properties"].items():
         if key not in arguments and "default" in spec:
             arguments[key] = spec["default"]
+    if name == "final_answer" and not arguments.get("final_answer", "").strip():
+        raise ValueError("Final Answer must contain a nonempty completed answer")
     return content.strip(), name, arguments
 
 
 class ToolCallStop:
-    """Stop after the native call, regardless of tokenizer boundary segmentation."""
-    def __init__(self, tokenizer, prompt_length):
+    """Stop only after a complete valid call, including the full Final Answer."""
+    def __init__(self, tokenizer, prompt_length, tools):
         self.tokenizer = tokenizer
         self.prompt_length = prompt_length
+        self.tools = tools
 
     def __call__(self, input_ids, scores, **kwargs):
         generated = input_ids[0][self.prompt_length:]
         # The closing delimiter is short; do not repeatedly decode the full answer.
-        return self.tokenizer.decode(generated[-32:], skip_special_tokens=False).rstrip().endswith("</tool_call>")
+        if not self.tokenizer.decode(generated[-32:], skip_special_tokens=False).rstrip().endswith("</tool_call>"):
+            return False
+        try:
+            parse_tool_response(self.tokenizer.decode(generated, skip_special_tokens=False), self.tools)
+        except (ValueError, TypeError):
+            return False
+        return True

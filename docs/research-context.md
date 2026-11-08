@@ -46,13 +46,17 @@ artifacts in commentary, multiple calls and trailing text are rejected. Reserved
 protocol delimiters cannot be embedded as literal parameter data. No tool runs
 on a rejected native response.
 
-Native generation stops at `</tool_call>` using decoded generated-token suffixes,
-independent of isolated stop-string tokenization. It does not stop at the legacy
+Native generation stops at `</tool_call>` only after the complete generated call
+passes schema/parser validation, not at a bare delimiter in unfinished text.
+Final Answer uses the same rule: its nonempty answer parameter and all closing
+tags must be complete before the custom stop fires and submission can execute.
+This is independent of isolated stop-string tokenization. It does not stop at the legacy
 `Observation:` string, which may appear inside parameters. Model EOS and output
 limits still apply; incomplete calls fail validation. Thinking remains disabled.
 
 History stores validated commentary separately from parsed arguments and raw
-output. Only commentary plus one structured `tool_calls` item is replayed: the
+output. Replay reconstructs commentary from parsed fields, ignoring raw text and
+cached preambles discarded by the parser. Only commentary plus one structured `tool_calls` item is replayed: the
 template renders XML once, and the tool result carries its call ID. There are no
 duplicated Action/Input headings or model-emitted XML in assistant content.
 Rejected outputs remain in inference logs; retries send concise feedback without

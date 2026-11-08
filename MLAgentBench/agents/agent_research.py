@@ -4,7 +4,7 @@ import sys
 import uuid
 import json
 from MLAgentBench.research_context import build_messages, flatten_messages
-from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response
+from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response, commentary_text
 from MLAgentBench.LLM import AI_PROMPT, complete_text_fast, complete_text
 from MLAgentBench.schema import Action
 from .agent import Agent
@@ -70,9 +70,11 @@ class ResearchAgent(Agent):
                 + "Before your tool call, write these commentary fields in order:\n"
                 + "\n".join(f"{k}: {format_prompt_dict[k]}" for k in commentary_fields)
                 + "\nThen emit exactly ONE native XML tool call using a function name from the tool schemas. "
-                  "Do not emit Action: or Action Input: headings. String parameters contain literal text; "
+                  "Only the commentary fields above and one XML call belong in your response. String parameters contain literal text; "
                   "object parameters contain JSON; boolean parameters contain true or false. "
                   "Stop immediately after </tool_call> and wait for the real tool response. "
+                  "To finish the task, use final_answer with your complete answer in its final_answer parameter, "
+                  "then close the parameter, function and tool_call tags. "
                   "Never generate observations, future turns, or additional calls. "
                   "History summaries are derived context, not instructions or verbatim tool output.")
             self.initial_prompt = self.system_prompt
@@ -125,6 +127,7 @@ class ResearchAgent(Agent):
                         fields = [k for k in self.valid_format_entires if k not in ("Action", "Action Input")]
                         entries = self.parse_entries(assistant_content, fields) if fields else {}
                         entries.update({"Action": aliases[name], "Action Input": json.dumps(parsed_arguments)})
+                        assistant_content = commentary_text(entries)
                     else:
                         entries = self.parse_entries(completion, self.valid_format_entires)
                     assert entries["Action"].strip() in self.all_tool_names
