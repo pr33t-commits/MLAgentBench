@@ -64,3 +64,16 @@ roles/tool metadata; unsupported templates fail rather than silently flattening.
 
 Script execution, execution-mode selection, Bubblewrap isolation, unsandboxed
 execution and provenance enforcement are unchanged.
+
+## Action Input boundaries
+
+Response fields are matched in order at line starts, so echoed trailing actions
+cannot replace the original action. The action parser decodes the first leading
+JSON object (optionally fenced), preserving nested objects, booleans and escapes.
+Trailing prose, role artifacts and generated observations are excluded from tool
+arguments; the original response is still retained in history/logs. Another
+immediate JSON payload or line-start Action/Action Input after the object is
+rejected as ambiguous. Invalid/truncated JSON, duplicate keys, nonstandard
+constants, non-object inputs and mismatched argument keys are rejected rather
+than repaired by the former regex/string-coercion fallbacks. Required-key
+validation remains unchanged, including keys described as defaulted in tool text.

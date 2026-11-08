@@ -152,7 +152,7 @@ class ResearchAgent(Agent):
                 usage = f"""{{
             {usage}
 }}"""
-                invalid_action_error = f"The action input for {action} needs to be a valid json with proper entries. You may have missed the comma between entries or used triple quotes (json does not recognizes triple quotes). Please use the correct format and try again:\n{usage}"
+                invalid_action_error = f"The action input for {action} needs to be a valid json with proper entries. Use the specific parsing error above to correct the JSON syntax or argument names. Return one JSON object with the following entries:\n{usage}"
 
                 observation = "ActionInputParsingError: "+ parsing_error + "\n" + invalid_action_error
 

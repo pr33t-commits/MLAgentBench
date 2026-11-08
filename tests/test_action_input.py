@@ -45,6 +45,50 @@ class ActionInputTests(unittest.TestCase):
         info = SimpleNamespace(usage={key: "" for key in expected})
         self.assertEqual(Agent.parse_action_input("```json\n" + json.dumps(expected) + "\n```", info), expected)
 
+    def test_trajectory_suffix_preserves_boolean_and_nested_values(self):
+        expected = {"datasets": {"train": "train.csv"}, "objective": 'Keep {braces}, "quotes", and \\n.',
+                    "script_name": "baseline.py", "use_demand_engine": False}
+        info = SimpleNamespace(usage=dict.fromkeys(expected))
+        for suffix in ('\nuser\nObservation:', '\nuser\n<think>\n\n</think>\nObservation:',
+                       '\nI will now run this script.', '\nObservation: {"invented": true}'):
+            for fenced in (False, True):
+                text = json.dumps(expected)
+                if fenced:
+                    text = '```json\n' + text + '\n```'
+                with self.subTest(suffix=suffix, fenced=fenced):
+                    actual = Agent.parse_action_input(text + suffix, info)
+                    self.assertEqual(actual, expected)
+                    self.assertIs(actual['use_demand_engine'], False)
+
+    def test_malformed_or_ambiguous_input_is_not_repaired(self):
+        info = SimpleNamespace(usage={'flag': ''})
+        for text in ('{"flag": false', '{"flag": False}', '{"flag": false,}',
+                     '{"flag": false, "flag": true}', '{"flag": NaN}',
+                     '[{"flag": false}]', '{"flag": false}\n{"flag": true}',
+                     '{"flag": false}\nAction: Delete File\nAction Input: {}',
+                     'Here is JSON: {"flag": false}', '{}', '{"flag": false, "extra": 1}'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                Agent.parse_action_input(text, info)
+        with self.assertRaises(ValueError):
+            Agent.parse_action_input('garbage', SimpleNamespace(usage={}))
+        self.assertEqual(Agent.parse_action_input('{}\nuser', SimpleNamespace(usage={})), {})
+
+    def test_first_action_is_not_replaced_by_trailing_action(self):
+        text = ('Thought: inspect\nAction: Read File\nAction Input: {"file_name": "a"}\n'
+                'Action: Delete File\nAction Input: {"file_name": "b"}')
+        entries = Agent.parse_entries(text, ['Thought', 'Action', 'Action Input'])
+        self.assertEqual(entries['Action'].strip(), 'Read File')
+        with self.assertRaisesRegex(ValueError, 'Ambiguous'):
+            Agent.parse_action_input(entries['Action Input'], SimpleNamespace(usage={'file_name': ''}))
+
+    def test_header_words_inside_json_are_not_fields(self):
+        expected = {'content': 'Action: example\nAction Input: {"a": 1}'}
+        text = 'Action: Write File\nAction Input: ' + json.dumps(expected) + '\nuser'
+        entries = Agent.parse_entries(text, ['Action', 'Action Input'])
+        self.assertEqual(entries['Action'].strip(), 'Write File')
+        self.assertEqual(Agent.parse_action_input(entries['Action Input'],
+                                                SimpleNamespace(usage={'content': ''})), expected)
+
 
 if __name__ == "__main__":
     unittest.main()
