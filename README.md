@@ -136,3 +136,8 @@ See all logs here: https://github.com/q-hwang/MLAgentBench_logs
 
 You can also specify tasks interactively to the research agent by running `research_agent_interactive.sh`, or ideally as a vscode extension.
 
+
+## Script execution mode
+
+Use `--execution-mode bubblewrap` or `--execution-mode unsandboxed` with the runner.
+The default `auto` preserves existing task behavior. See [execution modes](docs/unsandboxed-execution.md).

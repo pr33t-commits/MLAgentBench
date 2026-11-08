@@ -124,6 +124,7 @@ def run(agent_cls, args):
             print("Research problem: ", research_problem)
             print("Lower level actions enabled: ", [action.name for action in env.low_level_actions])
             print("High level actions enabled: ", [action.name for action in env.high_level_actions])
+            print("Script execution:", env.static_kwargs_for_tools.get("execution_mode", "auto"))
             print("Read only files: ", env.read_only_files, file=sys.stderr)
             print("=====================================")
 
@@ -156,6 +157,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-time", type=int, default=5* 60 * 60, help="max time")
     parser.add_argument("--device", type=int, default=0, help="device id")
     parser.add_argument("--python", type=str, default="python", help="python command")
+    parser.add_argument("--execution-mode", choices=("auto", "bubblewrap", "unsandboxed"),
+                        default="auto", help="Script isolation: auto preserves task defaults")
     parser.add_argument("--interactive", action="store_true", help="interactive mode")
     parser.add_argument("--resume", type=str, default=None, help="resume from a previous run")
     parser.add_argument("--resume-step", type=int, default=0, help="the step to resume from")

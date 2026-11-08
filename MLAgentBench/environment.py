@@ -22,7 +22,7 @@ from .schema import Step, Trace, EnvException, TooLongPromptError, LLMError, Enh
 from .LLM import complete_text_claude
 from .prepare_task import prepare_task, get_task_info
 from .library_context import build_library_context
-from .provenance import Provenance
+from .provenance import Provenance, resolve_execution_mode
 
 class TimeoutException(Exception): pass
 
@@ -86,6 +86,11 @@ class Environment:
             for name in ("Execute Experiment", "Read Experiment Log", "List Experiments"):
                 del self._action_infos[name]
 
+        requested_mode = getattr(args, "execution_mode", "auto")
+        execution_mode = resolve_execution_mode(requested_mode, receipt_dir is not None)
+        with open(os.path.join(self.log_dir, "execution_mode.json"), "w") as stream:
+            json.dump({"requested_mode": requested_mode, "mode": execution_mode,
+                       "filesystem_isolation": execution_mode == "bubblewrap"}, stream, indent=2)
         self.library_context = build_library_context(args.python)
         coding_research_problem = self.research_problem
         if receipt_dir:
@@ -93,6 +98,7 @@ class Environment:
             self._research_problem += "\n\n" + MAIN_AGENT_GUIDE
         self._static_kwargs_for_tools = {
             "receipt_dir": receipt_dir,
+            "execution_mode": execution_mode,
             "protected_features": receipt_dir is not None,
             "library_context": self.library_context,
             "device": args.device,

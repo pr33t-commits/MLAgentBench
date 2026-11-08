@@ -85,7 +85,7 @@ def execution_output(archive, stream, limit=16000):
 
 def execute_experiment(script_name, role, parent_submission_id, work_dir,
                        receipt_dir, python, timeout=600, device="",
-                       provenance_log=None, provenance_dir=None, protected_features=False, session_deadline=None):
+                       provenance_log=None, provenance_dir=None, protected_features=False, session_deadline=None, execution_mode="auto"):
     if role not in {"baseline", "experiment"}:
         raise ValueError("role must be baseline or experiment")
     work, root = Path(work_dir).resolve(), Path(receipt_dir).resolve()
@@ -137,7 +137,7 @@ def execute_experiment(script_name, role, parent_submission_id, work_dir,
                "accepted": False, "status": "running"}
     write_json(archive / "receipt.json", receipt)
     command, env = execution_command(python, script, work, provenance_log, provenance_dir,
-                                     protected_features=protected_features)
+                                     protected_features=protected_features, execution_mode=execution_mode)
     env.update(EXPERIMENT_OUTPUT_DIR=str(output), CUDA_VISIBLE_DEVICES=str(device))
     try:
         result = run_script(command, work, env, timeout=timeout, session_deadline=session_deadline)

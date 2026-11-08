@@ -185,7 +185,8 @@ def execute_script(script_name, work_dir = ".", **kwargs):
         python = kwargs["python"]
         cmd, process_env = execution_command(python, os.path.abspath(os.path.join(work_dir, script_path)),
                                              work_dir, kwargs.get("provenance_log"), kwargs.get("provenance_dir"),
-                                             protected_features=kwargs.get("protected_features", False))
+                                             protected_features=kwargs.get("protected_features", False),
+                                 execution_mode=kwargs.get("execution_mode", "auto"))
         process_env["CUDA_VISIBLE_DEVICES"] = str(device)
         execution_id = "exec_" + uuid.uuid4().hex
         started_at = time.time()
@@ -216,7 +217,8 @@ def execute_experiment(script_name, role, parent_submission_id, work_dir=".", **
                                  device=kwargs.get("device", ""),
                                  provenance_log=kwargs.get("provenance_log"),
                                  provenance_dir=kwargs.get("provenance_dir"),
-                                 protected_features=kwargs.get("protected_features", False))
+                                 protected_features=kwargs.get("protected_features", False),
+                                 execution_mode=kwargs.get("execution_mode", "auto"))
         return json.dumps({k: v for k, v in receipt.items() if k != "source_hashes"})
     except (ValueError, OSError, KeyError) as exc:
         raise EnvException(str(exc)) from exc
@@ -241,14 +243,15 @@ def list_experiment_records(**kwargs):
 @record_low_level_step
 def python_repl(command, work_dir = ".", **kwargs):
     """Run command and returns anything printed."""
-    if kwargs.get("protected_features"):
+    if kwargs.get("protected_features") or kwargs.get("execution_mode") == "bubblewrap":
         from pathlib import Path
         script = Path(work_dir).resolve() / (".repl_" + uuid.uuid4().hex + ".py")
         script.write_text(command, encoding="utf-8")
         try:
             cmd, env = execution_command(kwargs.get("python", sys.executable), script, work_dir,
                                          kwargs.get("provenance_log"), kwargs.get("provenance_dir"),
-                                         protected_features=True)
+                                         protected_features=kwargs.get("protected_features", False),
+                                         execution_mode=kwargs.get("execution_mode", "auto"))
             result = subprocess.run(cmd, cwd=work_dir, env=env, capture_output=True, text=True,
                                     timeout=kwargs.get("timeout", 600))
             return result.stdout + result.stderr

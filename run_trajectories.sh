@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Run independent trajectories with local Hugging Face planning and API helpers.
 # Requires CUDA-enabled PyTorch and OPENAI_API_KEY for the GPT helpers.
-# Usage: bash run_trajectories.sh [trajectory_count]
+# Usage: bash run_trajectories.sh [trajectory_count] [runner arguments...]
 set -uo pipefail
 
 N="${1:-5}"
+if (( $# > 0 )); then shift; fi
 MODEL="${MODEL:-huggingface/Qwen/Qwen3.5-4B}"
 HELPER_MODEL="${HELPER_MODEL:-gpt-5-nano}"
 PYTHON="$(command -v python)" || exit 1
@@ -43,6 +44,7 @@ CONFIG=(
   --retrieval
   --max-steps-in-context 5
   --max-observation-steps-in-context 5
+  "$@"
 )
 
 # Record configuration, source version and local edits without copying secrets.

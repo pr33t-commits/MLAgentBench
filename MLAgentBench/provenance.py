@@ -18,34 +18,45 @@ def save(path, value):
     temporary.replace(path)
 
 
+def resolve_execution_mode(mode="auto", protected_features=False):
+    if mode not in {"auto", "bubblewrap", "unsandboxed"}:
+        raise ValueError(f"Unknown execution mode: {mode}")
+    return ("bubblewrap" if protected_features else "unsandboxed") if mode == "auto" else mode
+
+
 def execution_command(python, script, work_dir, provenance_log=None, provenance_dir=None,
-                      protected_features=False):
+                      protected_features=False, execution_mode="auto"):
+    """Select OS isolation independently of feature bootstrapping and auditing."""
+    mode = resolve_execution_mode(execution_mode, protected_features)
     env = dict(os.environ)
+    env["MLAB_EXECUTION_MODE"] = mode
     if protected_features and (not provenance_log or not provenance_dir):
-        raise ValueError("Protected feature execution requires provenance recording")
-    if not provenance_log or not provenance_dir:
-        return [python, "-u", str(script)], env
-    env.update(MLAB_PROVENANCE_WORKSPACE=str(Path(work_dir).resolve()),
-               MLAB_PROVENANCE_LOG=str(provenance_log),
-               MLAB_PROVENANCE_OBJECTS=str(Path(provenance_dir).resolve() / "objects"))
-    command = [python, "-u", str(Path(__file__).with_name("provenance_runner.py")), str(script)]
+        raise ValueError("Feature-engine execution requires provenance recording")
+    work = Path(work_dir).resolve()
+    command = [python, "-u", str(script)]
+    writable = [work]
+    if provenance_log and provenance_dir:
+        env.update(MLAB_PROVENANCE_WORKSPACE=str(work),
+                   MLAB_PROVENANCE_LOG=str(provenance_log),
+                   MLAB_PROVENANCE_OBJECTS=str(Path(provenance_dir).resolve() / "objects"))
+        command = [python, "-u", str(Path(__file__).with_name("provenance_runner.py")), str(script)]
+        writable.extend([Path(provenance_dir).resolve() / "objects",
+                         Path(provenance_log).resolve().parent])
     if protected_features:
-        bwrap = shutil.which("bwrap")
-        if not bwrap or os.name != "posix":
-            raise RuntimeError("Protected forecasting requires Linux bubblewrap; no unprotected fallback")
-        work = Path(work_dir).resolve()
         utility = Path(__file__).with_name("forecast_features.py").resolve()
-        if utility.is_relative_to(work):
+        if mode == "bubblewrap" and utility.is_relative_to(work):
             raise ValueError("Trusted utility must be outside the writable workspace")
         audit = work / ".feature_audit"
         audit.mkdir(exist_ok=True)
         env.update(MLAB_FEATURE_ENGINE="1", MLAB_FEATURE_AUDIT_DIR=str(audit),
                    PYTHONDONTWRITEBYTECODE="1")
+    if mode == "bubblewrap":
+        bwrap = shutil.which("bwrap")
+        if not bwrap or os.name != "posix":
+            raise RuntimeError("Bubblewrap execution requires Linux bubblewrap; no unprotected fallback")
         command = [bwrap, "--die-with-parent", "--ro-bind", "/", "/",
-                   "--tmpfs", "/tmp", "--bind", str(work), str(work),
-                   "--proc", "/proc", "--dev", "/dev"] + [
-                   arg for path in (Path(provenance_dir).resolve() / "objects",
-                                    Path(provenance_log).resolve().parent)
+                   "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev"] + [
+                   arg for path in writable
                    for arg in ("--bind", str(path), str(path))] + ["--"] + command
     return command, env
 

@@ -274,7 +274,9 @@ Keep historical feature generation, fitting and prediction as separate stages.
 - Forecast input updates require a new engine. The utility cannot infer whether
   a supplied value is an observation or an externally produced prediction.
 
-The installed utility remains read-only inside protected executions. Builds emit
+The installed utility remains read-only when execution uses Bubblewrap. With
+`--execution-mode unsandboxed`, feature loading and auditing remain enabled but
+the utility has no OS-enforced write protection. Builds emit
 timing markers consumed by timeout diagnostics and preserve source/configuration,
 window and output hashes in the feature audit. Custom callbacks are not a sandbox.
 The main agent receives the planning guide; Create Script (AI) receives the usage
