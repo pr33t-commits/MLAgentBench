@@ -164,13 +164,13 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
             f.write(json.dumps({"model": model, "messages": messages, "tools": tools, "rendered_prompt": text,
                                 "input_tokens": len(encoded_input.input_ids[0])},
                                ensure_ascii=False) + "\n")
-    stop_sequence_ids = tokenizer([] if tools is not None else stop_sequences,
-                                  return_token_type_ids=False, add_special_tokens=False)
     stopping_criteria = StoppingCriteriaList()
     if tools is not None:
         stopping_criteria.append(ToolCallStop(tokenizer, len(encoded_input.input_ids[0]), tools))
-    for stop_sequence_input_ids in stop_sequence_ids.input_ids:
-        stopping_criteria.append(StopAtSpecificTokenCriteria(stop_sequence=stop_sequence_input_ids))
+    elif stop_sequences:
+        stop_sequence_ids = tokenizer(stop_sequences, return_token_type_ids=False, add_special_tokens=False)
+        for stop_sequence_input_ids in stop_sequence_ids.input_ids:
+            stopping_criteria.append(StopAtSpecificTokenCriteria(stop_sequence=stop_sequence_input_ids))
 
     output = hf_model.generate(
         **encoded_input,

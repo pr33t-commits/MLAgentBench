@@ -25,6 +25,7 @@ class HFRoutingTests(unittest.TestCase):
         node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'complete_text_hf')
         self.tokenizer = Mock()
         self.tokenizer.side_effect = lambda value, **kwargs: (
+            self.fail('Tokenizer must never receive an empty batch') if value == [] else
             SimpleNamespace(input_ids=[]) if isinstance(value, list)
             else Inputs(input_ids=[[1, 2]]))
         self.tokenizer.batch_decode.return_value = ['answer']
@@ -107,7 +108,8 @@ class HFRoutingTests(unittest.TestCase):
         criteria = self.model.generate.call_args.kwargs['stopping_criteria']
         self.assertEqual(len(criteria), 1)
         self.assertIsInstance(criteria[0], ToolCallStop)
-        self.assertEqual(self.tokenizer.call_args.args[0], [])
+        self.assertFalse(any(c.args[0] == [] for c in self.tokenizer.call_args_list))
+        self.assertFalse(any(c.args[0] == ['Observation:'] for c in self.tokenizer.call_args_list))
 
 
 if __name__ == '__main__':
