@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import uuid
 
 from MLAgentBench.research_context import build_messages, fit_messages, flatten_messages
+from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response
 
 
 def step(number=0):
@@ -79,9 +80,13 @@ class ResearchLoopTests(unittest.TestCase):
         self.ns = dict(os=os, sys=sys, re=re, json=json, uuid=uuid, Namespace=SimpleNamespace,
                        EnhancedJSONEncoder=json.JSONEncoder, AI_PROMPT="\n\nAssistant:",
                        build_messages=build_messages, flatten_messages=flatten_messages,
+                       uses_native_tools=uses_native_tools, tool_definitions=tool_definitions,
+                       tool_alias=tool_alias, parse_tool_response=parse_tool_response,
                        Action=lambda name, arguments: SimpleNamespace(name=name, arguments=arguments))
         exec(compile(ast.Module(body=[base], type_ignores=[]), str(root / "agent.py"), 'exec'), self.ns)
         tree = ast.parse((root / "agent_research.py").read_text())
+        assignments = [n for n in tree.body if isinstance(n, ast.Assign)]
+        exec(compile(ast.Module(body=assignments, type_ignores=[]), '<prompts>', 'exec'), self.ns)
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
         exec(compile(ast.Module(body=[cls], type_ignores=[]), str(root / "agent_research.py"), 'exec'), self.ns)
         self.agent = self.ns['ResearchAgent'].__new__(self.ns['ResearchAgent'])
@@ -102,7 +107,7 @@ class ResearchLoopTests(unittest.TestCase):
         self.agent.summarize_action_and_observation = Mock(return_value="[Reasoning]: summary")
         self.prompts = []
         self.responses = []
-        def complete(prompt, *args):
+        def complete(prompt, *args, **kwargs):
             self.prompts.append(copy.deepcopy(prompt))
             return self.responses.pop(0) if self.responses else self.response()
         self.ns['complete_text'] = complete
@@ -163,6 +168,40 @@ class ResearchLoopTests(unittest.TestCase):
         self.assertIn('character 5 to character 8', helper.call_args_list[1].args[0])
         self.assertIn('Segment 0:', helper.call_args_list[2].args[0])
         self.assertIn('Segment 1:', helper.call_args_list[2].args[0])
+
+    def test_native_init_loop_retry_and_single_call_history(self):
+        from unittest.mock import patch
+        self.agent.args.valid_format_entires = ['Research Plan and Status', 'Thought', 'Action', 'Action Input']
+        self.agent.prompt_tool_names = self.agent.all_tool_names
+        self.agent.tools_prompt = 'LEGACY ACTION EXAMPLES MUST NOT REACH NATIVE PROMPT'
+        self.agent.data_context = 'data context'
+        self.env.research_problem = 'forecast sales'
+        for info in self.agent.action_infos.values():
+            info.description = 'Execute or inspect a script'
+        with patch.object(self.ns['Agent'], '__init__', lambda *a: None):
+            self.ns['ResearchAgent'].__init__(self.agent, self.agent.args, self.env)
+        self.assertTrue(self.agent.native_tools)
+        self.assertNotIn('LEGACY ACTION EXAMPLES', self.agent.system_prompt)
+        self.assertNotIn('Stop after Action Input.', self.agent.system_prompt)
+        self.assertNotIn('forecast sales', self.agent.system_prompt)
+        self.assertIn('forecast sales', self.agent.task_prompt)
+        good = ('Research Plan and Status: verified plan\nThought: inspect\n'
+                '<tool_call><function=execute_script><parameter=script_name>run.py</parameter>'
+                '</function></tool_call>')
+        self.responses = ['malformed duplicate\nAction: Run\nAction: Run', good, good]
+        self.agent.args.agent_max_steps = 2
+        self.agent.run(self.env)
+        retry = self.prompts[1]
+        self.assertNotIn('malformed duplicate', str(retry))
+        self.assertEqual(retry[-1]['role'], 'user')
+        self.assertIn('No tool executed', retry[-1]['content'])
+        assistant = self.prompts[2][-2]
+        self.assertNotIn('<tool_call>', assistant['content'])
+        self.assertNotIn('Action:', assistant['content'])
+        self.assertEqual(len(assistant['tool_calls']), 1)
+        self.assertEqual(assistant['tool_calls'][0]['function']['name'], 'execute_script')
+        self.assertEqual(self.agent.history_steps[0]['raw_assistant_response'], good)
+        self.assertEqual(self.agent.history_steps[0]['action_input'], {'script_name': 'run.py'})
 
     def test_bad_arguments_retained_and_inspected_source_not_summarized(self):
         self.responses = [self.response('not json'), self.response(action='Inspect Script Lines')]

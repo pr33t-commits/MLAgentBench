@@ -1,79 +1,99 @@
-# Research Agent context attribution
+# Research Agent context and tool protocols
 
-The Hugging Face Research Agent passes a message list to the model's chat
-template. General instructions and tool descriptions are `system` content;
-the research problem and data/library context are `user` content. Each retained
-step has an `assistant` message and a corresponding `tool` response.
+## Qwen3.5 native tools
 
-The generation contract remains the existing labeled Reflection/Plan/Fact
-Check/Thought/Action/Action Input format. The existing parser and action registry
-still validate and execute actions. History adapts validated actions into
-`tool_calls` with parsed argument dictionaries and stable call IDs; these are
-framework metadata, not an assertion that the model originally emitted native
-tool-call XML. The original assistant response is retained verbatim in content,
-including its Action/Input fields. No native tools schema is passed that would
-instruct the model to switch output protocols. Qwen's template renders the
-historical call and result tags; native thinking remains disabled.
+For `huggingface/...Qwen3.5...` planner models, Research Agent uses the checkpoint's
+native tool protocol throughout. Other backends retain the labeled Action/Action
+Input protocol. Script execution and sandbox selection are unchanged.
 
-Invalid arguments do not create a fake tool execution: they retain the assistant
-response followed by explicitly labeled framework feedback in a user message.
-Format retries likewise retain the rejected response and validation feedback.
-Argument failures remain in history rather than being silently deleted after a
-later success; they count toward the step limit.
+General instructions are a system message; the research problem and data/library
+context are a user message. Enabled tool definitions are passed through `tools=`
+to `apply_chat_template`, which supplies native XML instructions. Definitions use
+stable snake_case names (e.g. `create_script_ai`) and typed parameters with defaults
+from action function signatures. Runtime arguments such as `work_dir` are not
+exposed. Adding non-string arguments to the registry requires updating the type
+mapping in `qwen_tools.py`.
 
-## Summaries and retention
+The model writes its configured Reflection/Research Plan/Fact Check/Thought
+fields as commentary, then exactly one call:
 
-- Checkpoints retain the raw assistant response, parsed action input, call ID,
-  raw observation, context observation, and summary provenance separately.
+```xml
+<tool_call>
+<function=create_script_ai>
+<parameter=datasets>
+{"train": "train.csv"}
+</parameter>
+<parameter=objective>
+Generate and validate historical features, then save features.csv.
+</parameter>
+<parameter=script_name>
+features.py
+</parameter>
+<parameter=use_demand_engine>
+true
+</parameter>
+</function>
+</tool_call>
+```
+
+This is Qwen's XML-like dialect, not standards-compliant XML. String parameters
+are literal text, not JSON strings or XML entities. Quotes, backslashes, internal
+newlines, `<` and `&` are preserved. Object/integer parameters are decoded as JSON
+and validated; booleans accept true/false and the True/False spelling emitted by
+the checkpoint's history template. Duplicate/unknown parameters or functions,
+missing required fields, malformed calls, mixed legacy headings, thinking/role
+artifacts in commentary, multiple calls and trailing text are rejected. Reserved
+protocol delimiters cannot be embedded as literal parameter data. No tool runs
+on a rejected native response.
+
+Native generation stops at `</tool_call>` using decoded generated-token suffixes,
+independent of isolated stop-string tokenization. It does not stop at the legacy
+`Observation:` string, which may appear inside parameters. Model EOS and output
+limits still apply; incomplete calls fail validation. Thinking remains disabled.
+
+History stores validated commentary separately from parsed arguments and raw
+output. Only commentary plus one structured `tool_calls` item is replayed: the
+template renders XML once, and the tool result carries its call ID. There are no
+duplicated Action/Input headings or model-emitted XML in assistant content.
+Rejected outputs remain in inference logs; retries send concise feedback without
+replaying malformed examples. Old checkpoints reconstruct commentary from parsed
+fields, exclude Action/Input fields and omit commentary containing protocol
+artifacts. Invalid legacy calls become framework feedback, not tool executions.
+
+## Summaries and context limits
+
+- Checkpoints retain raw assistant output, canonical commentary (native mode),
+  parsed arguments, call ID, raw observation, context observation and provenance.
 - Observations over 5,000 characters are summarized as before, except inspected
-  source remains verbatim. Summarized tool messages identify the summarizer,
-  source call/step and summary log. A failed/empty summary falls back to labeled
-  truncation; the raw result remains in the checkpoint.
-- Research-log entries identify their summarizer and source call. Summarization
-  prompts distinguish plans from observations and preserve identifiers, paths,
-  metrics, exceptions and uncertainty. They remain model-generated summaries,
-  not independently verified evidence.
-- Retrieval receives the latest plan. Its result is explicitly labeled derived
-  memory in a user context message before recent exchanges, never system rules
-  or a fabricated original assistant turn. Memory may overlap recent steps.
-- Existing step and observation windows remain supported. Omitted observations
-  explicitly say they are omitted and are not evidence of success.
-- HF token budgeting uses the tokenizer/model context limit, reserves output
-  tokens, drops oldest complete exchanges, then drops retrieved memory. It keeps
-  the system/task and latest exchange. If those cannot fit, it fails explicitly
-  instead of slicing through messages or silently truncating evidence.
+  source remains verbatim. Summarized tool messages identify summarizer, source
+  call/step and summary log. Failed/empty summaries use labeled truncation; the
+  original result remains in the checkpoint.
+- Research-log summaries identify source calls and distinguish plans from
+  observations. Prompts preserve identifiers, metrics, paths, exceptions and
+  uncertainty. These summaries remain derived evidence, not verified originals.
+- Retrieval receives the latest plan. Its output is labeled memory in a user
+  context message before recent exchanges, never system rules or a fabricated
+  original assistant turn. Memory may overlap recent steps.
+- Step/observation windows remain supported. Omitted results explicitly say they
+  are omitted and are not evidence of success.
+- HF budgeting counts the rendered prompt including tool definitions, reserves
+  output tokens, drops oldest complete exchanges, then retrieved memory. It keeps
+  system/task and the latest exchange; if these cannot fit it fails explicitly.
+  Raw checkpoint evidence is not deleted.
 
-Old checkpoints remain readable. Their assistant text is reconstructed from
-stored entries; old observations are labeled as possibly already summarized.
-Raw data lost by an older checkpoint cannot be reconstructed. Parsed legacy JSON
-arguments get matched call/result pairs; other legacy entries use labeled
-framework feedback rather than inventing arguments.
+Each HF planner log has a `.context.jsonl` sidecar containing the actual trimmed
+messages, tool definitions, rendered prompt and input-token count for each attempt.
+Inference logs retain decoded outputs, including rejected responses.
 
-## Inspection and compatibility
+## Legacy action format
 
-Each HF planner log has a `.context.jsonl` sidecar recording the actual messages
-after token-budget trimming, rendered template text, and input-token count for
-each attempt. This is the authoritative input log; the traditional log remains
-available for human-readable output and legacy token estimates.
+Other HF planners retain their existing chat-template path. Non-HF planners
+receive labeled flattened text through existing APIs. HF string callers remain
+supported and do not automatically enable tools.
 
-String callers of the HF helper remain supported. Non-HF Research Agent
-backends receive explicitly labeled flattened text through their existing APIs;
-this change does not implement native message/tool adapters for those backends.
-HF models used for Research Agent must provide a chat template supporting the
-roles/tool metadata; unsupported templates fail rather than silently flattening.
-
-Script execution, execution-mode selection, Bubblewrap isolation, unsandboxed
-execution and provenance enforcement are unchanged.
-
-## Action Input boundaries
-
-Response fields are matched in order at line starts, so echoed trailing actions
-cannot replace the original action. The action parser decodes the first leading
-JSON object (optionally fenced), preserving nested objects, booleans and escapes.
-Trailing prose, role artifacts and generated observations are excluded from tool
-arguments; the original response is still retained in history/logs. Another
-immediate JSON payload or line-start Action/Action Input after the object is
-rejected as ambiguous. Invalid/truncated JSON, duplicate keys, nonstandard
-constants, non-object inputs and mismatched argument keys are rejected rather
-than repaired by the former regex/string-coercion fallbacks. Required-key
-validation remains unchanged, including keys described as defaulted in tool text.
+The legacy parser decodes one leading JSON object, optionally fenced, preserves
+types/escapes and excludes trailing prose from arguments. It rejects additional
+immediate JSON payloads, trailing Action/Input headers, malformed JSON, duplicate
+keys, nonstandard constants and mismatched keys rather than repairing them by
+regex. Its required-key behavior is unchanged; native tools honor defaults from
+action function signatures instead.

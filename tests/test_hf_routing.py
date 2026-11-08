@@ -97,6 +97,18 @@ class HFRoutingTests(unittest.TestCase):
         self.assertEqual(len(rendered), 4)
         self.assertEqual(rendered[-1]['content'], '1')
 
+    def test_native_tools_go_to_template_not_generate_and_override_legacy_stop(self):
+        from MLAgentBench.qwen_tools import ToolCallStop
+        definitions = [{'type': 'function', 'function': {'name': 'list_files', 'parameters': {}}}]
+        self.ns['complete_text_hf']([{'role': 'user', 'content': 'task'}],
+            model='huggingface/Qwen/Qwen3.5-4B', tools=definitions, stop_sequences=['Observation:'])
+        self.assertEqual(self.tokenizer.apply_chat_template.call_args.kwargs['tools'], definitions)
+        self.assertNotIn('tools', self.model.generate.call_args.kwargs)
+        criteria = self.model.generate.call_args.kwargs['stopping_criteria']
+        self.assertEqual(len(criteria), 1)
+        self.assertIsInstance(criteria[0], ToolCallStop)
+        self.assertEqual(self.tokenizer.call_args.args[0], [])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,9 +1,10 @@
 """Build attributed research context without loading inference clients."""
 import json
+from .qwen_tools import tool_alias
 
 
 def build_messages(system, task, history, last_steps, last_observations,
-                   memory=None, summarizer=None):
+                   memory=None, summarizer=None, native_tools=False):
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": task}]
     if memory:
@@ -29,10 +30,22 @@ def build_messages(system, task, history, last_steps, last_observations,
             except (TypeError, ValueError):
                 pass
         valid_call = isinstance(arguments, dict) and not step.get("parsing_error")
+        if native_tools:
+            # Only validated commentary goes back to the model. Keep raw output
+            # exclusively in the audit record, not as another serialized call.
+            content = step.get("assistant_content")
+            if content is None:
+                content = "\n".join(f"{k}: {v}" for k, v in entries.items()
+                                    if k not in ("Action", "Action Input"))
+                if any(tag in content for tag in ("<tool_call>", "<think>", "</think>", "<|im_")):
+                    content = "[Legacy commentary omitted because it contains protocol artifacts.]"
+            assistant = {"role": "assistant", "content": content, "reasoning_content": ""}
         if valid_call:
             assistant["tool_calls"] = [{"id": call_id, "type": "function", "function": {
-                "name": entries["Action"].strip(), "arguments": arguments}}]
-        messages.append(assistant)
+                "name": tool_alias(entries["Action"].strip()) if native_tools else entries["Action"].strip(),
+                "arguments": arguments}}]
+        if valid_call or not native_tools:
+            messages.append(assistant)
         if len(history) - idx > last_observations:
             observation = "[Tool observation omitted by context policy; not evidence of success.]"
         else:
@@ -45,7 +58,8 @@ def build_messages(system, task, history, last_steps, last_observations,
                 observation = "[Legacy stored observation; may already be summarized.]\n" + observation
         if valid_call:
             messages.append({"role": "tool", "tool_call_id": call_id,
-                             "name": entries["Action"].strip(), "content": observation})
+                             "name": tool_alias(entries["Action"].strip()) if native_tools else entries["Action"].strip(),
+                             "content": observation})
         else:
             # Invalid arguments never executed a tool. Do not invent a tool call.
             messages.append({"role": "user", "content":

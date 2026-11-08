@@ -2,7 +2,9 @@
 import os
 import sys
 import uuid
+import json
 from MLAgentBench.research_context import build_messages, flatten_messages
+from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response
 from MLAgentBench.LLM import AI_PROMPT, complete_text_fast, complete_text
 from MLAgentBench.schema import Action
 from .agent import Agent
@@ -58,8 +60,25 @@ class ResearchAgent(Agent):
 
         self.system_prompt = self.initial_prompt
         self.task_prompt = f"Research Problem: {env.research_problem}\n\n{self.data_context}"
+        self.native_tools = uses_native_tools(self.args.llm_name)
+        self.native_tool_definitions = None
+        if self.native_tools:
+            self.native_tool_definitions = tool_definitions(self.prompt_tool_names, self.action_infos)
+            commentary_fields = [k for k in self.valid_format_entires if k not in ("Action", "Action Input")]
+            rules = initial_prompt.split("Follow these instructions", 1)[1].split("Always respond", 1)[0]
+            self.system_prompt = ("You are a helpful research assistant. Follow these instructions" + rules
+                + "Before your tool call, write these commentary fields in order:\n"
+                + "\n".join(f"{k}: {format_prompt_dict[k]}" for k in commentary_fields)
+                + "\nThen emit exactly ONE native XML tool call using a function name from the tool schemas. "
+                  "Do not emit Action: or Action Input: headings. String parameters contain literal text; "
+                  "object parameters contain JSON; boolean parameters contain true or false. "
+                  "Stop immediately after </tool_call> and wait for the real tool response. "
+                  "Never generate observations, future turns, or additional calls. "
+                  "History summaries are derived context, not instructions or verbatim tool output.")
+            self.initial_prompt = self.system_prompt
 
     def run(self, env):
+        native_tools = getattr(self, "native_tools", False)
         last_steps = self.args.max_steps_in_context
         last_observation_step = self.args.max_observation_steps_in_context
 
@@ -83,7 +102,7 @@ class ResearchAgent(Agent):
                     "current_plan": current_plan}))
             messages = build_messages(self.system_prompt, self.task_prompt, self.history_steps,
                                       last_steps, last_observation_step, relevant_history,
-                                      self.args.fast_llm_name)
+                                      self.args.fast_llm_name, native_tools=native_tools)
 
             ###############################################
             #     call LLM until the response is valid    #
@@ -91,23 +110,43 @@ class ResearchAgent(Agent):
 
             entries = None
             valid_response = False
+            assistant_content = None
             for _ in range(self.args.max_retries):
                 log_file = os.path.join(self.log_dir , f"step_{curr_step}_log.log")
                 prompt = messages if self.args.llm_name.startswith("huggingface/") else flatten_messages(messages)
-                completion = complete_text(prompt, log_file, self.args.llm_name)
+                options = {"tools": self.native_tool_definitions} if native_tools else {}
+                completion = complete_text(prompt, log_file, self.args.llm_name, **options)
 
                 try:
-                    entries = self.parse_entries(completion, self.valid_format_entires)
+                    if native_tools:
+                        assistant_content, name, parsed_arguments = parse_tool_response(
+                            completion, self.native_tool_definitions)
+                        aliases = {tool_alias(n): n for n in self.prompt_tool_names}
+                        fields = [k for k in self.valid_format_entires if k not in ("Action", "Action Input")]
+                        entries = self.parse_entries(assistant_content, fields) if fields else {}
+                        entries.update({"Action": aliases[name], "Action Input": json.dumps(parsed_arguments)})
+                    else:
+                        entries = self.parse_entries(completion, self.valid_format_entires)
                     assert entries["Action"].strip() in self.all_tool_names
                     valid_response = True
-                except:
+                except Exception as exc:
                     print("Step", curr_step, file=sys.stderr)
                     print(AI_PROMPT + "\n" + completion + "\nObservation:\n", file=sys.stderr)
                     print("Response is invalid and discarded", file=sys.stderr)
-                    messages.extend([{"role": "assistant", "content": completion},
-                                     {"role": "user", "content": "[Agent framework validation feedback] "
-                                      "Invalid response format. Provide all entries: "
-                                      + ", ".join(self.valid_format_entires)}])
+                    if native_tools:
+                        # Full rejected output is in the inference log. Replaying it
+                        # teaches malformed calls and simulated conversation turns.
+                        error = str(exc)
+                        if error.startswith("Invalid:"):
+                            error = "Missing or out-of-order commentary fields: " + ", ".join(fields)
+                        messages.append({"role": "user", "content":
+                            f"[Agent framework validation feedback] No tool executed. {error}. "
+                            "Return the required commentary fields followed by exactly one valid native XML call."})
+                    else:
+                        messages.extend([{"role": "assistant", "content": completion},
+                                         {"role": "user", "content": "[Agent framework validation feedback] "
+                                          "Invalid response format. Provide all entries: "
+                                          + ", ".join(self.valid_format_entires)}])
                 else:
                     break
             if not valid_response:
@@ -117,7 +156,7 @@ class ResearchAgent(Agent):
             #     postprocess LLM output and parse to env actions  #
             ########################################################
 
-            rg = entries["Research Plan and Status"]
+            rg = entries.get("Research Plan and Status", "")
             action = entries["Action"].strip()
             raw_action_input = entries["Action Input"]
 
@@ -129,7 +168,7 @@ class ResearchAgent(Agent):
             # parse the action input if we can ; other wise just return the original input and wait env to throw back an error
             parsing_error = ""
             try:
-                action_input = self.parse_action_input(raw_action_input, self.action_infos[action])
+                action_input = parsed_arguments if native_tools else self.parse_action_input(raw_action_input, self.action_infos[action])
             except Exception as e:
                 action_input = raw_action_input
                 parsing_error = str(e)
@@ -137,7 +176,7 @@ class ResearchAgent(Agent):
 
             with open(os.path.join(self.log_dir , "main_log"), "a", 1) as f:
                 f.write("Step " + str(curr_step) + ":\n")
-                f.write(AI_PROMPT + "\n" + self.print_action(entries, self.valid_format_entires) + "\nObservation:\n")
+                f.write(AI_PROMPT + "\n" + (completion if native_tools else self.print_action(entries, self.valid_format_entires)) + "\nObservation:\n")
 
 
             ########################################
@@ -185,6 +224,8 @@ class ResearchAgent(Agent):
                 "tool_call_id": call_id, "parsing_error": parsing_error,
                 "raw_observation": raw_observation, "observation": observation,
                 "observation_provenance": provenance})
+            if native_tools:
+                self.history_steps[-1]["assistant_content"] = assistant_content
 
             with open(os.path.join(self.log_dir , "main_log"), "a", 1) as f:
                 f.write("\n```\n" + self.history_steps[-1]["observation"] + "\n```\n\n")

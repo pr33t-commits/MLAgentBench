@@ -113,9 +113,10 @@ def request_openai_responses(payload, timeout=600):
     response.raise_for_status()
     return response.json()
 
-def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/CodeLlama-7b-hf", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, **kwargs):
+def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/CodeLlama-7b-hf", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, tools=None, **kwargs):
     import json
     from .research_context import fit_messages
+    from .qwen_tools import ToolCallStop
     model = model.split("/", 1)[1]
     if model in loaded_hf_models:
         hf_model, tokenizer = loaded_hf_models[model]
@@ -138,8 +139,9 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
     if isinstance(prompt, list) or "qwen3" in model.lower():
         messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": prompt}]
         def render(items):
+            options = {"tools": tools} if tools is not None else {}
             return tokenizer.apply_chat_template(
-                items, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+                items, tokenize=False, add_generation_prompt=True, enable_thinking=False, **options)
         # HF tokenizer sentinel values are not real context limits.
         config = getattr(hf_model, "config", None)
         text_config = getattr(config, "text_config", config)
@@ -159,11 +161,14 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
     if log_file is not None:
         # Capture the actual post-trimming input, even if generation fails.
         with open(str(log_file) + ".context.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps({"model": model, "messages": messages, "rendered_prompt": text,
+            f.write(json.dumps({"model": model, "messages": messages, "tools": tools, "rendered_prompt": text,
                                 "input_tokens": len(encoded_input.input_ids[0])},
                                ensure_ascii=False) + "\n")
-    stop_sequence_ids = tokenizer(stop_sequences, return_token_type_ids=False, add_special_tokens=False)
+    stop_sequence_ids = tokenizer([] if tools is not None else stop_sequences,
+                                  return_token_type_ids=False, add_special_tokens=False)
     stopping_criteria = StoppingCriteriaList()
+    if tools is not None:
+        stopping_criteria.append(ToolCallStop(tokenizer, len(encoded_input.input_ids[0])))
     for stop_sequence_input_ids in stop_sequence_ids.input_ids:
         stopping_criteria.append(StopAtSpecificTokenCriteria(stop_sequence=stop_sequence_input_ids))
 
