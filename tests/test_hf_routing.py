@@ -3,6 +3,8 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace, ModuleType
 import sys
+import json
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -35,7 +37,7 @@ class HFRoutingTests(unittest.TestCase):
             loader.from_pretrained.return_value.to.return_value = self.model
         self.config = Mock()
         self.config.from_pretrained.return_value = SimpleNamespace(model_type='qwen3_5')
-        self.ns = dict(AutoConfig=self.config, AutoModelForCausalLM=self.causal,
+        self.ns = dict(__package__='MLAgentBench', AutoConfig=self.config, AutoModelForCausalLM=self.causal,
                        AutoTokenizer=SimpleNamespace(from_pretrained=Mock(return_value=self.tokenizer)),
                        torch=SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True,
                                                                  is_bf16_supported=lambda: True),
@@ -61,6 +63,39 @@ class HFRoutingTests(unittest.TestCase):
         self.ns['complete_text_hf']('hello', model='huggingface/Qwen/Qwen3-4B')
         self.causal.from_pretrained.assert_called_once()
         self.conditional.from_pretrained.assert_not_called()
+
+    def test_structured_context_reaches_template_and_is_logged(self):
+        messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "task"},
+                    {"role": "assistant", "content": "Action: Run", "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "Run", "arguments": {}}}]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": "done"}]
+        self.tokenizer.apply_chat_template.return_value = "rendered context"
+        self.ns['log_to_file'] = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            log = str(Path(directory) / 'step.log')
+            self.ns['complete_text_hf'](messages, model='huggingface/Qwen/Qwen3.5-4B', log_file=log)
+            record = json.loads(Path(log + '.context.jsonl').read_text())
+        self.assertEqual(self.tokenizer.apply_chat_template.call_args.args[0], messages)
+        self.assertEqual(record['messages'], messages)
+        self.assertEqual(record['rendered_prompt'], 'rendered context')
+        tokenization = next(c for c in self.tokenizer.call_args_list if c.args[0] == 'rendered context')
+        self.assertFalse(tokenization.kwargs['add_special_tokens'])
+
+    def test_context_limit_reserves_generation_tokens(self):
+        self.tokenizer.model_max_length = 10
+        self.tokenizer.apply_chat_template.side_effect = lambda items, **kw: 'x' * len(items)
+        self.tokenizer.side_effect = lambda value, **kw: (
+            SimpleNamespace(input_ids=[]) if isinstance(value, list) else
+            Inputs(input_ids=[[1, 2]]) if kw.get('return_tensors') else
+            SimpleNamespace(input_ids=list(value)))
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "t"}]
+        for n in range(2):
+            messages.extend([{"role": "assistant", "content": str(n)},
+                             {"role": "tool", "content": str(n)}])
+        self.ns['complete_text_hf'](messages, model='huggingface/Qwen/Qwen3.5-4B', max_tokens_to_sample=6)
+        rendered = self.tokenizer.apply_chat_template.call_args.args[0]
+        self.assertEqual(len(rendered), 4)
+        self.assertEqual(rendered[-1]['content'], '1')
 
 
 if __name__ == '__main__':

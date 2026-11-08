@@ -114,6 +114,8 @@ def request_openai_responses(payload, timeout=600):
     return response.json()
 
 def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/CodeLlama-7b-hf", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, **kwargs):
+    import json
+    from .research_context import fit_messages
     model = model.split("/", 1)[1]
     if model in loaded_hf_models:
         hf_model, tokenizer = loaded_hf_models[model]
@@ -132,16 +134,34 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
         hf_model.eval()
         loaded_hf_models[model] = (hf_model, tokenizer)
 
-    if "qwen3" in model.lower():
-        text = tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        encoded_input = tokenizer(text, return_tensors="pt", return_token_type_ids=False).to(hf_model.device)
+    messages = None
+    if isinstance(prompt, list) or "qwen3" in model.lower():
+        messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": prompt}]
+        def render(items):
+            return tokenizer.apply_chat_template(
+                items, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        # HF tokenizer sentinel values are not real context limits.
+        config = getattr(hf_model, "config", None)
+        text_config = getattr(config, "text_config", config)
+        limits = [getattr(tokenizer, "model_max_length", None),
+                  getattr(text_config, "max_position_embeddings", None)]
+        limits = [n for n in limits if isinstance(n, int) and 0 < n < 10**9]
+        if isinstance(prompt, list) and limits:
+            messages = fit_messages(messages, lambda items: len(tokenizer(
+                render(items), add_special_tokens=False).input_ids),
+                min(limits) - max_tokens_to_sample)
+        text = render(messages)
+        encoded_input = tokenizer(text, return_tensors="pt", return_token_type_ids=False,
+                                  add_special_tokens=False).to(hf_model.device)
     else:
+        text = prompt
         encoded_input = tokenizer(prompt, return_tensors="pt", return_token_type_ids=False).to(hf_model.device)
+    if log_file is not None:
+        # Capture the actual post-trimming input, even if generation fails.
+        with open(str(log_file) + ".context.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"model": model, "messages": messages, "rendered_prompt": text,
+                                "input_tokens": len(encoded_input.input_ids[0])},
+                               ensure_ascii=False) + "\n")
     stop_sequence_ids = tokenizer(stop_sequences, return_token_type_ids=False, add_special_tokens=False)
     stopping_criteria = StoppingCriteriaList()
     for stop_sequence_input_ids in stop_sequence_ids.input_ids:
