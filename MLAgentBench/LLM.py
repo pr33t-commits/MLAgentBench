@@ -113,6 +113,9 @@ def request_openai_responses(payload, timeout=600):
     response.raise_for_status()
     return response.json()
 
+HF_ENABLE_THINKING = False
+
+
 def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/CodeLlama-7b-hf", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, tools=None, **kwargs):
     import json
     from .research_context import fit_messages
@@ -141,7 +144,8 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
         def render(items):
             options = {"tools": tools} if tools is not None else {}
             return tokenizer.apply_chat_template(
-                items, tokenize=False, add_generation_prompt=True, enable_thinking=False, **options)
+                items, tokenize=False, add_generation_prompt=True,
+                enable_thinking=HF_ENABLE_THINKING, **options)
         # HF tokenizer sentinel values are not real context limits.
         config = getattr(hf_model, "config", None)
         text_config = getattr(config, "text_config", config)

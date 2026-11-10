@@ -2,6 +2,7 @@
 # Run independent trajectories with local Hugging Face planning and API helpers.
 # Requires CUDA-enabled PyTorch and OPENAI_API_KEY for the GPT helpers.
 # Usage: bash run_trajectories.sh [trajectory_count] [runner arguments...]
+# Example: bash run_trajectories.sh 5 --enable-thinking true
 set -uo pipefail
 
 N="${1:-5}"

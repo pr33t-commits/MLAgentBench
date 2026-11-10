@@ -166,6 +166,8 @@ if __name__ == "__main__":
     # general agent configs
     parser.add_argument("--agent-type", type=str, default="ResearchAgent", help="agent type")
     parser.add_argument("--llm-name", type=str, default="claude-v1", help="llm name")
+    parser.add_argument("--enable-thinking", type=str.lower, choices=("true", "false"),
+                        default="false", help="enable thinking in Hugging Face chat templates")
     parser.add_argument("--fast-llm-name", type=str, default="claude-v1", help="llm name")
     parser.add_argument("--edit-script-llm-name", type=str, default="claude-v1", help="llm name")
     parser.add_argument("--edit-script-llm-max-tokens", type=int, default=20000, help="llm max tokens")
@@ -190,4 +192,5 @@ if __name__ == "__main__":
         # should not use these actions when there is no retrieval
         args.actions_remove_from_prompt.extend(["Retrieval from Research Log", "Append Summary to Research Log", "Reflection"])
     LLM.FAST_MODEL = args.fast_llm_name
+    LLM.HF_ENABLE_THINKING = args.enable_thinking == "true"
     run(getattr(sys.modules[__name__], args.agent_type), args)
