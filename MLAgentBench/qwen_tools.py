@@ -61,6 +61,20 @@ def tool_definitions(names, infos):
     return tools
 
 
+def assistant_after_reasoning(text):
+    """Separate a leading reasoning section and terminal message marker."""
+    text = text.lstrip()
+    if text.startswith("<think>"):
+        end = text.find("</think>")
+        if end < 0:
+            raise ValueError("Incomplete reasoning section: expected </think>")
+        reasoning, text = text[len("<think>"):end], text[end + len("</think>"):]
+    else:
+        reasoning = ""
+    text = re.sub(r"(?:<\|im_end\|>|<\|endoftext\|>)\s*$", "", text.rstrip())
+    return reasoning, text
+
+
 def parse_tool_response(text, tools):
     """Parse exactly one call; Qwen's <function=name> dialect is not XML proper.
 
@@ -68,6 +82,7 @@ def parse_tool_response(text, tools):
     preserves code, quotes, newlines and ampersands as the official template does.
     Non-string parameters are decoded according to the advertised JSON schema.
     """
+    _, text = assistant_after_reasoning(text)
     if text.count("<tool_call>") != 1 or text.count("</tool_call>") != 1:
         raise ValueError("Return exactly one complete <tool_call> block")
     content, call = text.split("<tool_call>", 1)
@@ -140,11 +155,12 @@ def parse_tool_response(text, tools):
 
 
 class ToolCallStop:
-    """Stop only after a complete valid call, including the full Final Answer."""
-    def __init__(self, tokenizer, prompt_length, tools):
+    """Stop at a closed call outside reasoning, before argument validation."""
+    def __init__(self, tokenizer, prompt_length, tools, reasoning_started=False):
         self.tokenizer = tokenizer
         self.prompt_length = prompt_length
         self.tools = tools
+        self.reasoning_started = reasoning_started
 
     def __call__(self, input_ids, scores, **kwargs):
         generated = input_ids[0][self.prompt_length:]
@@ -152,7 +168,15 @@ class ToolCallStop:
         if not self.tokenizer.decode(generated[-32:], skip_special_tokens=False).rstrip().endswith("</tool_call>"):
             return False
         try:
-            parse_tool_response(self.tokenizer.decode(generated, skip_special_tokens=False), self.tools)
+            text = self.tokenizer.decode(generated, skip_special_tokens=False)
+            if self.reasoning_started:
+                text = "<think>" + text
+            _, content = assistant_after_reasoning(text)
         except (ValueError, TypeError):
             return False
-        return True
+        if "<tool_call>" not in content:
+            return False
+        body = content.split("<tool_call>", 1)[1]
+        # A closing marker inside a still-open literal parameter is data.
+        return ("</tool_call>" in body and
+                body.count("<parameter=") <= body.count("</parameter>"))

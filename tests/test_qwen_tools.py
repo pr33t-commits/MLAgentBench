@@ -59,7 +59,6 @@ class NativeToolTests(unittest.TestCase):
                  good.replace('{"train": "train.csv"}', '{"train": 42}'),
                  good.replace('{"train": "train.csv"}', '{"train":"a", "train":"b"}'),
                  'Action: Create Script (AI)\nAction Input: {}\n' + good,
-                 '<think>hidden</think>' + good,
                  good.replace('<parameter=datasets>', 'broken<parameter=datasets>')]
         for text in cases:
             with self.subTest(text=text[:80]), self.assertRaises(ValueError):
@@ -122,9 +121,25 @@ class NativeToolTests(unittest.TestCase):
             self.assertFalse(stop([list(text[:i])], None), i)
         self.assertTrue(stop([list(text)], None))
         blank = '<tool_call><function=final_answer><parameter=final_answer> </parameter></function></tool_call>'
-        self.assertFalse(stop([list(blank)], None))
+        self.assertTrue(stop([list(blank)], None))
         with self.assertRaises(ValueError):
             parse_tool_response(blank, tools)
+
+    def test_thinking_boundaries_and_invalid_completed_calls(self):
+        good = response()
+        text = '<think>Example: ' + good + '</think>' + good + '<|im_end|>'
+        self.assertEqual(parse_tool_response(text, definitions()),
+                         parse_tool_response(good, definitions()))
+        tokenizer = SimpleNamespace(decode=lambda ids, **kw: ''.join(ids))
+        stop = ToolCallStop(tokenizer, 0, definitions(), reasoning_started=True)
+        self.assertFalse(stop([list('Example: ' + good)], None))
+        self.assertTrue(stop([list('Example: ' + good + '</think>' + good)], None))
+        bad = good.replace('<function=create_script_ai>', '<function=unknown>')
+        self.assertTrue(ToolCallStop(tokenizer, 0, definitions())([list(bad)], None))
+        with self.assertRaisesRegex(ValueError, 'Unknown or disabled'):
+            parse_tool_response(bad, definitions())
+        with self.assertRaisesRegex(ValueError, 'Incomplete reasoning'):
+            parse_tool_response('<think>' + good, definitions())
 
     def test_history_ignores_unparsed_cached_content_and_legacy_labels(self):
         entries = {'Thought': 'inspect', 'Action': 'List Files', 'Action Input': '{}'}

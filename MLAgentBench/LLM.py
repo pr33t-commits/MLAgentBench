@@ -170,7 +170,9 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
                                ensure_ascii=False) + "\n")
     stopping_criteria = StoppingCriteriaList()
     if tools is not None:
-        stopping_criteria.append(ToolCallStop(tokenizer, len(encoded_input.input_ids[0]), tools))
+        stopping_criteria.append(ToolCallStop(
+            tokenizer, len(encoded_input.input_ids[0]), tools,
+            reasoning_started=text.rstrip().endswith("<think>")))
     elif stop_sequences:
         stop_sequence_ids = tokenizer(stop_sequences, return_token_type_ids=False, add_special_tokens=False)
         for stop_sequence_input_ids in stop_sequence_ids.input_ids:
@@ -188,8 +190,10 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
     )
     sequences = output.sequences
     sequences = [sequence[len(encoded_input.input_ids[0]) :] for sequence in sequences]
-    all_decoded_text = tokenizer.batch_decode(sequences, skip_special_tokens=True)
+    all_decoded_text = tokenizer.batch_decode(sequences, skip_special_tokens=tools is None)
     completion = all_decoded_text[0]
+    if tools is not None and text.rstrip().endswith("<think>"):
+        completion = "<think>" + completion
     if log_file is not None:
         log_to_file(log_file, prompt, completion, model, max_tokens_to_sample)
     return completion
