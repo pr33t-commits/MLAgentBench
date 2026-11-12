@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from MLAgentBench.qwen_tools import parse_tool_response, tool_definitions, ToolCallStop, uses_native_tools
+from MLAgentBench.qwen_tools import parse_tool_response, parse_research_response, status_tool_definition, tool_definitions, ToolCallStop, uses_native_tools
 from MLAgentBench.research_context import build_messages
 
 
@@ -153,6 +153,41 @@ class NativeToolTests(unittest.TestCase):
         assistant = build_messages('s', 't', history, 3, 3, native_tools=True)[2]
         self.assertNotIn('<tool_call>', assistant['content'])
         self.assertNotIn('Action:', assistant['content'])
+
+
+class TwoCallTests(unittest.TestCase):
+    def setUp(self):
+        self.tools = [status_tool_definition()] + definitions()
+        self.status = ('<tool_call><function=record_research_status>'
+            '<parameter=reflection>start</parameter><parameter=research_plan_and_status>plan</parameter>'
+            '<parameter=fact_check>none</parameter><parameter=thought>inspect</parameter>'
+            '</function></tool_call>')
+        self.work = '<tool_call><function=list_files><parameter=dir_path>.</parameter></function></tool_call>'
+
+    def test_validate_both_calls_and_specific_failures(self):
+        reasoning, status, name, args = parse_research_response('<think>reason</think>' + self.status + self.work, self.tools)
+        self.assertEqual((reasoning, status['thought'], name, args), ('reason', 'inspect', 'list_files', {'dir_path': '.'}))
+        cases = [self.status, self.work + self.status, self.status * 2, self.status + self.work * 2,
+                 self.status + self.work[:-10], self.status + self.work.replace('list_files', 'unknown'),
+                 self.status.replace('<parameter=thought>inspect</parameter>', '') + self.work,
+                 self.status.replace('>inspect</parameter>', '> </parameter>') + self.work,
+                 self.status.replace('</function>', '<parameter=thought>x</parameter></function>') + self.work,
+                 self.status.replace('parameter=thought', 'parameter=unknown') + self.work,
+                 self.status + self.work.replace('dir_path', 'unknown'),
+                 self.status + self.work + 'trailing']
+        for case in cases:
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                parse_research_response(case, self.tools)
+
+    def test_stop_waits_for_second_call_and_ignores_literal_markers(self):
+        stop = ToolCallStop(SimpleNamespace(decode=lambda ids, **kw: ''.join(ids)), 0, self.tools, two_calls=True)
+        self.assertFalse(stop([list('<think>' + self.status)], None))
+        self.assertFalse(stop([list('<think>' + self.status + '</think>' + self.status)], None))
+        partial = self.status + '<tool_call><function=list_files><parameter=dir_path>literal </tool_call>'
+        self.assertFalse(stop([list(partial)], None))
+        self.assertTrue(stop([list(self.status + self.work)], None))
+        literal = self.work.replace('>.</parameter>', '>literal </tool_call></parameter>')
+        self.assertEqual(parse_research_response(self.status + literal, self.tools)[3]['dir_path'], 'literal </tool_call>')
 
 
 if __name__ == '__main__':

@@ -12,7 +12,14 @@ from unittest.mock import Mock
 import uuid
 
 from MLAgentBench.research_context import build_messages, fit_messages, flatten_messages
-from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response, commentary_text
+from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response, commentary_text, parse_research_response, status_tool_definition
+
+
+def status_call():
+    return ('<tool_call><function=record_research_status>'
+            '<parameter=reflection>start</parameter><parameter=research_plan_and_status>plan</parameter>'
+            '<parameter=fact_check>no results</parameter><parameter=thought>inspect</parameter>'
+            '</function></tool_call>')
 
 
 def step(number=0):
@@ -82,7 +89,8 @@ class ResearchLoopTests(unittest.TestCase):
                        build_messages=build_messages, flatten_messages=flatten_messages,
                        uses_native_tools=uses_native_tools, tool_definitions=tool_definitions,
                        tool_alias=tool_alias, parse_tool_response=parse_tool_response,
-                       commentary_text=commentary_text,
+                       commentary_text=commentary_text, parse_research_response=parse_research_response,
+                       status_tool_definition=status_tool_definition,
                        Action=lambda name, arguments: SimpleNamespace(name=name, arguments=arguments))
         exec(compile(ast.Module(body=[base], type_ignores=[]), str(root / "agent.py"), 'exec'), self.ns)
         tree = ast.parse((root / "agent_research.py").read_text())
@@ -186,7 +194,7 @@ class ResearchLoopTests(unittest.TestCase):
         self.assertNotIn('Stop after Action Input.', self.agent.system_prompt)
         self.assertNotIn('forecast sales', self.agent.system_prompt)
         self.assertIn('forecast sales', self.agent.task_prompt)
-        good = ('DISCARDED PREFIX\nResearch Plan and Status: verified plan\nThought: inspect\n'
+        good = (status_call() +
                 '<tool_call><function=execute_script><parameter=script_name>run.py</parameter>'
                 '</function></tool_call>')
         self.responses = ['malformed duplicate\nAction: Run\nAction: Run', good, good]
@@ -196,14 +204,61 @@ class ResearchLoopTests(unittest.TestCase):
         self.assertNotIn('malformed duplicate', str(retry))
         self.assertEqual(retry[-1]['role'], 'user')
         self.assertIn('No tool executed', retry[-1]['content'])
-        assistant = self.prompts[2][-2]
+        assistant = self.prompts[2][-3]
         self.assertNotIn('<tool_call>', assistant['content'])
-        self.assertNotIn('DISCARDED PREFIX', assistant['content'])
+        self.assertEqual(assistant['reasoning_content'], '')
         self.assertNotIn('Action:', assistant['content'])
-        self.assertEqual(len(assistant['tool_calls']), 1)
-        self.assertEqual(assistant['tool_calls'][0]['function']['name'], 'execute_script')
+        self.assertEqual(len(assistant['tool_calls']), 2)
+        self.assertEqual(assistant['tool_calls'][1]['function']['name'], 'execute_script')
         self.assertEqual(self.agent.history_steps[0]['raw_assistant_response'], good)
         self.assertEqual(self.agent.history_steps[0]['action_input'], {'script_name': 'run.py'})
+
+    def test_native_thinking_status_and_work_roundtrip(self):
+        self.agent.native_tools = True
+        self.agent.args.retrieval = False
+        self.agent.args.agent_max_steps = 1
+        self.agent.prompt_tool_names = self.agent.all_tool_names
+        for info in self.agent.action_infos.values():
+            info.description = "work"
+        self.agent.native_tool_definitions = [status_tool_definition()] + tool_definitions(self.agent.prompt_tool_names, self.agent.action_infos)
+        work = '<tool_call><function=execute_script><parameter=script_name>run.py</parameter></function></tool_call>'
+        self.responses = ['<think>private reasoning</think>' + status_call() + work]
+        self.agent.run(self.env)
+        self.assertEqual(len(self.calls), 1)
+        saved = self.agent.history_steps[0]
+        self.assertEqual(saved['reasoning_content'], 'private reasoning')
+        self.assertEqual(saved['action']['Research Plan and Status'].strip(), 'plan')
+        self.assertEqual(saved['research_status']['fact_check'], 'no results')
+        restored = self.ns['ResearchAgent'].__new__(self.ns['ResearchAgent'])
+        restored.log_dir = self.tmp.name
+        restored.args = vars(self.agent.args)
+        restored.history_steps = self.agent.history_steps
+        path = os.path.join(self.tmp.name, 'native.json')
+        restored.save(path)
+        restored.history_steps = []
+        restored.restore(path)
+        messages = build_messages('s', 't', restored.history_steps, 1, 1, native_tools=True)
+        self.assertEqual(messages[2]['reasoning_content'], 'private reasoning')
+        self.assertEqual([x['function']['name'] for x in messages[2]['tool_calls']],
+                         ['record_research_status', 'execute_script'])
+        self.assertEqual([messages[3]['tool_call_id'], messages[4]['tool_call_id']],
+                         [x['id'] for x in messages[2]['tool_calls']])
+
+    def test_invalid_status_or_work_does_not_execute_and_feedback_is_specific(self):
+        self.agent.native_tools = True
+        self.agent.args.retrieval = False
+        self.agent.prompt_tool_names = self.agent.all_tool_names
+        for info in self.agent.action_infos.values():
+            info.description = 'work'
+        self.agent.native_tool_definitions = [status_tool_definition()] + tool_definitions(self.agent.prompt_tool_names, self.agent.action_infos)
+        work = '<tool_call><function=execute_script><parameter=script_name>run.py</parameter></function></tool_call>'
+        bad_status = status_call().replace('<parameter=thought>inspect</parameter>', '') + work
+        bad_work = status_call() + work.replace('script_name', 'wrong')
+        self.responses = [bad_status, bad_work]
+        self.assertEqual(self.agent.run(self.env), 'No valid response after max_retries')
+        self.assertFalse(self.calls)
+        self.assertIn('thought', self.prompts[1][-1]['content'])
+        self.assertIn('Call 1', self.prompts[1][-1]['content'])
 
     def test_bad_arguments_retained_and_inspected_source_not_summarized(self):
         self.responses = [self.response('not json'), self.response(action='Inspect Script Lines')]
@@ -222,8 +277,8 @@ class ResearchLoopTests(unittest.TestCase):
         self.agent.all_tool_names = self.agent.prompt_tool_names = ['Final Answer']
         self.agent.action_infos = {'Final Answer': SimpleNamespace(
             description='Finish', usage={'final_answer': 'Complete answer'})}
-        self.agent.native_tool_definitions = tool_definitions(self.agent.prompt_tool_names, self.agent.action_infos)
-        partial = ('Research Plan and Status: verified\nThought: finish\n'
+        self.agent.native_tool_definitions = [status_tool_definition()] + tool_definitions(self.agent.prompt_tool_names, self.agent.action_infos)
+        partial = (status_call() +
                    '<tool_call><function=final_answer><parameter=final_answer>Complete report')
         complete = partial + '</parameter></function></tool_call>'
         self.responses = [partial, complete]

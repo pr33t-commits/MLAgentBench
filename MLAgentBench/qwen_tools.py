@@ -83,10 +83,14 @@ def parse_tool_response(text, tools):
     Non-string parameters are decoded according to the advertised JSON schema.
     """
     _, text = assistant_after_reasoning(text)
-    if text.count("<tool_call>") != 1 or text.count("</tool_call>") != 1:
+    if "<tool_call>" not in text:
         raise ValueError("Return exactly one complete <tool_call> block")
     content, call = text.split("<tool_call>", 1)
-    body, suffix = call.split("</tool_call>", 1)
+    calls = split_native_calls("<tool_call>" + call)
+    if len(calls) != 1:
+        raise ValueError("Return exactly one complete <tool_call> block")
+    body = calls[0][len("<tool_call>"):-len("</tool_call>")]
+    suffix = ""
     if suffix.strip():
         raise ValueError("No text or additional calls may follow </tool_call>")
     if re.search(r"(?m)^\s*Action(?: Input)?:", content) or any(
@@ -133,7 +137,10 @@ def parse_tool_response(text, tools):
                 raise ValueError(f"{key} must be a boolean")
             value = raw.strip().lower() == "true"
         else:
-            value = json.loads(raw, object_pairs_hook=object_pairs, parse_constant=invalid_constant)
+            try:
+                value = json.loads(raw, object_pairs_hook=object_pairs, parse_constant=invalid_constant)
+            except ValueError as exc:
+                raise ValueError(f"{key}: {exc}") from exc
             if kind == "integer" and type(value) is not int:
                 raise ValueError(f"{key} must be an integer")
             if kind == "object" and (not isinstance(value, dict) or
@@ -154,13 +161,88 @@ def parse_tool_response(text, tools):
     return content.strip(), name, arguments
 
 
+STATUS_FIELDS = ("reflection", "research_plan_and_status", "fact_check", "thought")
+
+
+def status_tool_definition():
+    return {"type": "function", "function": {"name": "record_research_status",
+        "description": "Record research status; contents are not automatically fact checked.",
+        "parameters": {"type": "object", "properties": {
+            key: {"type": "string", "description": key.replace("_", " ")}
+            for key in STATUS_FIELDS}, "required": list(STATUS_FIELDS), "additionalProperties": False}}}
+
+
+def split_native_calls(text):
+    """Find call boundaries while treating parameter bodies as literal text."""
+    calls = []
+    pos = 0
+    while True:
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos == len(text):
+            return calls
+        if not text.startswith("<tool_call>", pos):
+            raise ValueError(f"Call {len(calls) + 1}: expected <tool_call>; unexpected or trailing content")
+        start = pos
+        pos += len("<tool_call>")
+        while True:
+            marker = re.search(r"<parameter=[a-zA-Z0-9_]+>|</tool_call>|<tool_call>", text[pos:])
+            if not marker:
+                raise ValueError(f"Call {len(calls) + 1}: incomplete tool call")
+            pos += marker.start()
+            token = marker.group()
+            if token.startswith("<parameter="):
+                end = text.find("</parameter>", pos + len(token))
+                if end < 0:
+                    raise ValueError(f"Call {len(calls) + 1}: incomplete {token} parameter")
+                pos = end + len("</parameter>")
+            elif token == "<tool_call>":
+                raise ValueError(f"Call {len(calls) + 1}: nested or incomplete tool call")
+            else:
+                pos += len(token)
+                calls.append(text[start:pos])
+                break
+
+
+def parse_research_response(text, tools):
+    """Validate both calls completely before the caller executes any work."""
+    reasoning, content = assistant_after_reasoning(text)
+    calls = split_native_calls(content)
+    if len(calls) != 2:
+        raise ValueError(f"Expected exactly two calls: status then work; found {len(calls)}")
+    parsed = []
+    for index, call in enumerate(calls):
+        try:
+            # Protect literal tool delimiters within parameter values from the
+            # single-call parser's global delimiter count.
+            match = re.fullmatch(r"<tool_call>\s*<function=([a-zA-Z0-9_]+)>.*</function>\s*</tool_call>", call, re.DOTALL)
+            if not match:
+                raise ValueError("Malformed function or parameter blocks")
+            name = match.group(1)
+            if index == 0 and name != "record_research_status":
+                raise ValueError(f"expected record_research_status, got {name}")
+            if index == 1 and name == "record_research_status":
+                raise ValueError("record_research_status cannot be the work tool")
+            # Existing parser handles parameter schema/type validation.
+            _, name, arguments = parse_tool_response(call, tools)
+            if index == 0:
+                for key in STATUS_FIELDS:
+                    if not arguments[key].strip():
+                        raise ValueError(f"{key} must be nonempty")
+            parsed.append((name, arguments))
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"Call {index + 1} ({'status' if index == 0 else 'work'}): {exc}") from exc
+    return reasoning, parsed[0][1], parsed[1][0], parsed[1][1]
+
+
 class ToolCallStop:
     """Stop at a closed call outside reasoning, before argument validation."""
-    def __init__(self, tokenizer, prompt_length, tools, reasoning_started=False):
+    def __init__(self, tokenizer, prompt_length, tools, reasoning_started=False, two_calls=False):
         self.tokenizer = tokenizer
         self.prompt_length = prompt_length
         self.tools = tools
         self.reasoning_started = reasoning_started
+        self.two_calls = two_calls
 
     def __call__(self, input_ids, scores, **kwargs):
         generated = input_ids[0][self.prompt_length:]
@@ -174,6 +256,11 @@ class ToolCallStop:
             _, content = assistant_after_reasoning(text)
         except (ValueError, TypeError):
             return False
+        if self.two_calls:
+            try:
+                return len(split_native_calls(content)) >= 2
+            except ValueError:
+                return False
         if "<tool_call>" not in content:
             return False
         body = content.split("<tool_call>", 1)[1]

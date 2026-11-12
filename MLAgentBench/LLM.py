@@ -172,7 +172,8 @@ def complete_text_hf(prompt, stop_sequences=[], model="huggingface/codellama/Cod
     if tools is not None:
         stopping_criteria.append(ToolCallStop(
             tokenizer, len(encoded_input.input_ids[0]), tools,
-            reasoning_started=text.rstrip().endswith("<think>")))
+            reasoning_started=text.rstrip().endswith("<think>"),
+            two_calls=any(t["function"]["name"] == "record_research_status" for t in tools)))
     elif stop_sequences:
         stop_sequence_ids = tokenizer(stop_sequences, return_token_type_ids=False, add_special_tokens=False)
         for stop_sequence_input_ids in stop_sequence_ids.input_ids:

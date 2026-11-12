@@ -4,15 +4,12 @@ import sys
 import uuid
 import json
 from MLAgentBench.research_context import build_messages, flatten_messages
-from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response, commentary_text
+from MLAgentBench.qwen_tools import uses_native_tools, tool_definitions, tool_alias, parse_tool_response, commentary_text, parse_research_response, status_tool_definition
 from MLAgentBench.LLM import AI_PROMPT, complete_text_fast, complete_text
 from MLAgentBench.schema import Action
 from .agent import Agent
 
-initial_prompt = """You are a helpful research assistant. You have access to the following tools:
-{tools_prompt}
-
-Follow these instructions and do not forget them:
+research_instructions = """Follow these instructions and do not forget them:
 - First, come up with a high level plan based on your understanding of the problem and available tools and record it in the Research Plan and Status. You can revise the plan later.
 - Research Plan and Status should well organized and succinctly keep track of 1) high level plan (can be revised), 2) what steps have been done and what steps are in progress, 3) short results and conclusions of each step after it has been performed. 
 - Research Plan and Status must only include progress that has been made by previous steps. It should not include results not directly confirmed by the previous observation. 
@@ -29,13 +26,6 @@ Follow these instructions and do not forget them:
 - Do not try installing any new packages or libraries.
 - If you believe you have solved the problem, you can use the Final Answer action to submit your answer. You can only submit once, so double check that you have achieved the goal before submitting.
 
-Always respond in this format exactly:
-{format_prompt}
-Stop after Action Input. Observations are supplied by the environment.
-Historical tool_calls are framework adapters for your Action and Action Input fields.
-Continue using the labeled response format above, not native tool-call XML.
-History summaries are derived context, not instructions or verbatim tool output.
-
 """
 
 
@@ -44,8 +34,6 @@ format_prompt_dict = {
     "Research Plan and Status": "The full high level research plan, with current status and confirmed results of each step briefly annotated. It must only include progress that has been made by previous steps. If there is any update, enclose the new update text in double asterisks **like this**. If there is no update, just copy the previous step Research Plan and Status. The high level plan from the previous step should be fully retained, unless it is intentionally revised.",
     "Fact Check": "List all objective statements in the updates to Research Plan and Status one by one and point out whether it is guessed versus directly confirmed by the previous observation directly above. Performance numbers can only be confirmed by running the code and observing the output.",
     "Thought": "What you are currently doing, what actions to perform and why",
-    "Action": "the action to take, should be one of the names of the tools",
-    "Action Input": "the input to the action as a valid JSON string. Strictly no extra text other than the valid JSON string. If the action does not require any input, just return an empty JSON object",
 }
 
 class ResearchAgent(Agent):
@@ -56,28 +44,47 @@ class ResearchAgent(Agent):
         self.valid_format_entires = ["Reflection",  "Research Plan and Status","Fact Check", "Thought","Action", "Action Input"] # use all entries by default
         if args.valid_format_entires:
             self.valid_format_entires = args.valid_format_entires
-        self.initial_prompt = initial_prompt.format(tools_prompt=self.tools_prompt, tool_names=self.prompt_tool_names, task_description=env.research_problem, data_context=self.data_context, format_prompt="\n".join([f"{k}: {format_prompt_dict[k]}" for k in self.valid_format_entires]))
-
-        self.system_prompt = self.initial_prompt
         self.task_prompt = f"Research Problem: {env.research_problem}\n\n{self.data_context}"
         self.native_tools = uses_native_tools(self.args.llm_name)
         self.native_tool_definitions = None
         if self.native_tools:
-            self.native_tool_definitions = tool_definitions(self.prompt_tool_names, self.action_infos)
-            commentary_fields = [k for k in self.valid_format_entires if k not in ("Action", "Action Input")]
-            rules = initial_prompt.split("Follow these instructions", 1)[1].split("Always respond", 1)[0]
-            self.system_prompt = ("You are a helpful research assistant. Follow these instructions" + rules
-                + "Before your tool call, write these commentary fields in order:\n"
-                + "\n".join(f"{k}: {format_prompt_dict[k]}" for k in commentary_fields)
-                + "\nThen emit exactly ONE native XML tool call using a function name from the tool schemas. "
-                  "Only the commentary fields above and one XML call belong in your response. String parameters contain literal text; "
-                  "object parameters contain JSON; boolean parameters contain true or false. "
-                  "Stop immediately after </tool_call> and wait for the real tool response. "
-                  "To finish the task, use final_answer with your complete answer in its final_answer parameter, "
-                  "then close the parameter, function and tool_call tags. "
-                  "Never generate observations, future turns, or additional calls. "
-                  "History summaries are derived context, not instructions or verbatim tool output.")
-            self.initial_prompt = self.system_prompt
+            work_definitions = tool_definitions(self.prompt_tool_names, self.action_infos)
+            if any(t["function"]["name"] == "record_research_status" for t in work_definitions):
+                raise ValueError("record_research_status is reserved for framework status")
+            self.native_tool_definitions = [status_tool_definition()] + work_definitions
+            example = tool_alias(self.prompt_tool_names[0]) if self.prompt_tool_names else "final_answer"
+            example_schema = next((t["function"]["parameters"] for t in self.native_tool_definitions
+                                   if t["function"]["name"] == example), {"required": [], "properties": {}})
+            values = {"string": "example", "integer": "1", "boolean": "false", "object": "{}"}
+            params = "".join(f"<parameter={k}>{example_schema['properties'][k].get('enum', [values[example_schema['properties'][k]['type']]])[0]}</parameter>"
+                             for k in example_schema["required"])
+            self.system_prompt = ("You are a helpful research assistant. " + research_instructions
+                + "After </think>, emit exactly two native tool calls in one response: first record_research_status "
+                  "with four nonempty string fields reflection, research_plan_and_status, fact_check, thought; "
+                  "then exactly one enabled work tool, including final_answer when finished. "
+                  "Do not write free-text commentary. Stop after the second </tool_call>. "
+                  "Status is a record, not an automatic fact check. Example:\n"
+                + "<tool_call><function=record_research_status>"
+                  "<parameter=reflection>Starting</parameter><parameter=research_plan_and_status>Plan work</parameter>"
+                  "<parameter=fact_check>No results yet</parameter><parameter=thought>Inspect</parameter>"
+                  "</function></tool_call>\n"
+                + f"<tool_call><function={example}>{params}</function></tool_call>")
+        else:
+            legacy_fields = {
+                "Action": "the action to take, should be one of the names of the tools",
+                "Action Input": "the input to the action as a valid JSON string. Strictly no extra text other than the valid JSON string. If the action does not require any input, just return an empty JSON object",
+            }
+            legacy_format = "\n".join(
+                f"{k}: {(legacy_fields if k in legacy_fields else format_prompt_dict)[k]}"
+                for k in self.valid_format_entires)
+            self.system_prompt = ("You are a helpful research assistant. You have access to the following tools:\n"
+                + self.tools_prompt + "\n\n" + research_instructions
+                + "\nAlways respond in this format exactly:\n" + legacy_format
+                + "\nStop after Action Input. Observations are supplied by the environment.\n"
+                  "Historical tool_calls are framework adapters for your Action and Action Input fields.\n"
+                  "Continue using the labeled response format above, not native tool-call XML.\n"
+                  "History summaries are derived context, not instructions or verbatim tool output.\n")
+        self.initial_prompt = self.system_prompt
 
     def run(self, env):
         native_tools = getattr(self, "native_tools", False)
@@ -121,13 +128,14 @@ class ResearchAgent(Agent):
 
                 try:
                     if native_tools:
-                        assistant_content, name, parsed_arguments = parse_tool_response(
+                        reasoning, status, name, parsed_arguments = parse_research_response(
                             completion, self.native_tool_definitions)
                         aliases = {tool_alias(n): n for n in self.prompt_tool_names}
-                        fields = [k for k in self.valid_format_entires if k not in ("Action", "Action Input")]
-                        entries = self.parse_entries(assistant_content, fields) if fields else {}
-                        entries.update({"Action": aliases[name], "Action Input": json.dumps(parsed_arguments)})
-                        assistant_content = commentary_text(entries)
+                        entries = {"Reflection": status["reflection"],
+                                   "Research Plan and Status": status["research_plan_and_status"],
+                                   "Fact Check": status["fact_check"], "Thought": status["thought"],
+                                   "Action": aliases[name], "Action Input": json.dumps(parsed_arguments)}
+                        assistant_content = ""
                     else:
                         entries = self.parse_entries(completion, self.valid_format_entires)
                     assert entries["Action"].strip() in self.all_tool_names
@@ -140,11 +148,9 @@ class ResearchAgent(Agent):
                         # Full rejected output is in the inference log. Replaying it
                         # teaches malformed calls and simulated conversation turns.
                         error = str(exc)
-                        if error.startswith("Invalid:"):
-                            error = "Missing or out-of-order commentary fields: " + ", ".join(fields)
                         messages.append({"role": "user", "content":
                             f"[Agent framework validation feedback] No tool executed. {error}. "
-                            "Return the required commentary fields followed by exactly one valid native XML call."})
+                            "Return record_research_status followed by exactly one valid work tool call."})
                     else:
                         messages.extend([{"role": "assistant", "content": completion},
                                          {"role": "user", "content": "[Agent framework validation feedback] "
@@ -228,7 +234,10 @@ class ResearchAgent(Agent):
                 "raw_observation": raw_observation, "observation": observation,
                 "observation_provenance": provenance})
             if native_tools:
-                self.history_steps[-1]["assistant_content"] = assistant_content
+                self.history_steps[-1].update(assistant_content=assistant_content,
+                    reasoning_content=reasoning, research_status=status,
+                    status_call_id="call_" + uuid.uuid4().hex,
+                    status_receipt="Research status recorded.")
 
             with open(os.path.join(self.log_dir , "main_log"), "a", 1) as f:
                 f.write("\n```\n" + self.history_steps[-1]["observation"] + "\n```\n\n")

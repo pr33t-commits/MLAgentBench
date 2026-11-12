@@ -33,14 +33,24 @@ def build_messages(system, task, history, last_steps, last_observations,
         if native_tools:
             # Only validated commentary goes back to the model. Keep raw output
             # exclusively in the audit record, not as another serialized call.
-            content = commentary_text(entries)
-            assistant = {"role": "assistant", "content": content, "reasoning_content": ""}
+            status = step.get("research_status")
+            content = "" if status is not None else commentary_text(entries)
+            assistant = {"role": "assistant", "content": content,
+                         "reasoning_content": step.get("reasoning_content", "")}
         if valid_call:
             assistant["tool_calls"] = [{"id": call_id, "type": "function", "function": {
                 "name": tool_alias(entries["Action"].strip()) if native_tools else entries["Action"].strip(),
                 "arguments": arguments}}]
+        if native_tools and valid_call and step.get("research_status") is not None:
+            status_id = step.get("status_call_id", f"legacy_status_{idx}")
+            assistant["tool_calls"].insert(0, {"id": status_id, "type": "function", "function": {
+                "name": "record_research_status", "arguments": step["research_status"]}})
         if valid_call or not native_tools:
             messages.append(assistant)
+        if native_tools and valid_call and step.get("research_status") is not None:
+            messages.append({"role": "tool", "tool_call_id": status_id,
+                             "name": "record_research_status",
+                             "content": step.get("status_receipt", "Research status recorded.")})
         if len(history) - idx > last_observations:
             observation = "[Tool observation omitted by context policy; not evidence of success.]"
         else:
