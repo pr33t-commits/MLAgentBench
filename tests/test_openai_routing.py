@@ -80,7 +80,7 @@ class UsageLoggingTests(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / 'MLAgentBench/LLM.py'
         tree = ast.parse(path.read_text())
         node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'log_to_file')
-        ns = {'enc': SimpleNamespace(encode=lambda text: list(text)),
+        ns = {'enc': SimpleNamespace(encode=lambda text, **kwargs: list(text)),
               'HUMAN_PROMPT': 'Human:', 'AI_PROMPT': 'Assistant:'}
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), ns)
         metadata = {'usage': {'input_tokens': 7, 'output_tokens': 10,
@@ -93,6 +93,26 @@ class UsageLoggingTests(unittest.TestCase):
             self.assertIn('Estimated visible completion tokens', text)
             self.assertIn('Summary: cafe', text)
             self.assertEqual(json.loads(Path(str(log) + '.usage.jsonl').read_text(encoding='utf-8')), metadata)
+
+    def test_logs_special_tokens_in_prompt_and_completion(self):
+        import tempfile
+        import tiktoken
+        path = Path(__file__).resolve().parents[1] / 'MLAgentBench/LLM.py'
+        tree = ast.parse(path.read_text())
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'log_to_file')
+        encoding = tiktoken.Encoding(name='test', pat_str=r'(?s:.)',
+                                     mergeable_ranks={bytes([i]): i for i in range(256)},
+                                     special_tokens={'<|endoftext|>': 256})
+        ns = {'enc': encoding,
+              'HUMAN_PROMPT': 'Human:', 'AI_PROMPT': 'Assistant:'}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), ns)
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'request.log'
+            ns['log_to_file'](log, 'prompt <|endoftext|>', 'answer <|endoftext|>', 'qwen', 100)
+            text = log.read_text(encoding='utf-8')
+            self.assertIn('prompt <|endoftext|>', text)
+            self.assertIn('answer <|endoftext|>', text)
+            self.assertIn('Estimated visible completion tokens', text)
 
 if __name__ == '__main__':
     unittest.main()

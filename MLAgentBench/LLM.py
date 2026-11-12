@@ -78,10 +78,10 @@ def log_to_file(log_file, prompt, completion, model, max_tokens_to_sample, api_m
     with open(log_file, "a", encoding="utf-8") as f:
         f.write("\n===================prompt=====================\n")
         f.write(f"{HUMAN_PROMPT} {prompt} {AI_PROMPT}")
-        num_prompt_tokens = len(enc.encode(f"{HUMAN_PROMPT} {prompt} {AI_PROMPT}"))
+        num_prompt_tokens = len(enc.encode(f"{HUMAN_PROMPT} {prompt} {AI_PROMPT}", disallowed_special=()))
         f.write(f"\n==================={model} response ({max_tokens_to_sample})=====================\n")
         f.write(completion)
-        num_sample_tokens = len(enc.encode(completion))
+        num_sample_tokens = len(enc.encode(completion, disallowed_special=()))
         f.write("\n===================tokens=====================\n")
         f.write(f"Estimated prompt tokens (local tokenizer): {num_prompt_tokens}\n")
         f.write(f"Estimated visible completion tokens (local tokenizer): {num_sample_tokens}\n")
