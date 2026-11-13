@@ -432,12 +432,12 @@ Concisely list relevant information under [Assistant decisions], [Observed resul
 HIGH_LEVEL_ACTIONS =[
     ActionInfo(
         name="Understand File",
-        description="For CSV/TSV/TAB files (including gzip), returns a computed full-file profile without LLM calls: shape, dtypes, missing/unique counts, numeric statistics, zero frequencies, top categorical values, and date coverage. Tabular profiling is standard, not customized by things_to_look_for; use Create Script (AI) and Execute Script for plots, seasonality or other custom analysis. For other text files, uses an LLM to inspect chunks for the requested information. Use Inspect Script Lines for specific code sections.",
+        description="For dataset files in CSV/TSV/TAB (including gzip) or Parquet (.parquet/.pq), returns a fixed, predetermined full-file profile without LLM calls: shape, dtypes, missing/unique counts, numeric statistics, zero frequencies, top categorical values, and date coverage. The things_to_look_for request does not customize this profile or answer specific questions. For specific knowledge, plots, seasonality, or other analysis of the dataset, write and execute a custom Python script. Parquet requires an installed pandas Parquet engine. For other text files, uses an LLM to inspect chunks for the requested information. Use Inspect Script Lines for specific code sections.",
         usage={
             "file_name": "a valid file name with relative path to current directory if needed",
-            "things_to_look_for": "a detailed description on what to look for and what should returned"
+            "things_to_look_for": "For text files, describe what to inspect. For supported dataset files, this does not change the fixed profile; use a custom Python script for specific questions."
         },
-        return_value="The observation will be a description of relevant content and lines in the file. If the file does not exist, the observation will be an error message.",
+        return_value="A fixed profile for supported dataset files, or a description of relevant content and lines for text files. Errors are reported if the file cannot be read.",
         function=understand_file
     ),
     ActionInfo(

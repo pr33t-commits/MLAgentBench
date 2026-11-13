@@ -115,6 +115,8 @@ class CreateScriptTests(unittest.TestCase):
             else:
                 path.write_text(text)
             observation = self.actions.understand_file(filename, "Sales statistics", work_dir=str(self.root))
+            self.assertIn("things_to_look_for request does not customize", observation)
+            self.assertIn("custom Python script", observation)
             profile = json.loads(observation.split("\n", 1)[1])
             self.assertEqual(profile["shape"], [2, 4])
             self.assertEqual(profile["columns"]["sales_units"]["statistics"]["mean"], 5)
@@ -127,6 +129,18 @@ class CreateScriptTests(unittest.TestCase):
                 self.actions.understand_file(filename, "Inspect", work_dir=str(self.root))
         self.actions.complete_text_fast.assert_not_called()
         self.actions.complete_text.assert_not_called()
+
+    def test_understand_parquet_uses_fixed_profile(self):
+        import pandas as pd
+        path = self.root / 'sales.parquet'
+        path.touch()
+        self.actions.complete_text_fast.reset_mock()
+        with patch('pandas.read_parquet', return_value=pd.DataFrame({'sales': [0, 10]})) as read:
+            observation = self.actions.understand_file('sales.parquet', 'Find seasonality', work_dir=str(self.root))
+        read.assert_called_once_with(path.resolve())
+        self.assertEqual(json.loads(observation.split('\n', 1)[1])['shape'], [2, 1])
+        self.assertIn('does not customize', observation)
+        self.actions.complete_text_fast.assert_not_called()
 
     def test_understand_text_keeps_llm_route(self):
         self.actions.complete_text_fast.reset_mock()

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .schema import EnvException
 
-TABULAR_SUFFIXES = (".csv", ".tsv", ".tab", ".csv.gz", ".tsv.gz", ".tab.gz")
+TABULAR_SUFFIXES = (".csv", ".tsv", ".tab", ".csv.gz", ".tsv.gz", ".tab.gz", ".parquet", ".pq")
 
 
 def profile_table(file_name, work_dir="."):
@@ -17,7 +17,10 @@ def profile_table(file_name, work_dir="."):
         raise EnvException("Tabular input must be an existing file inside the workspace")
     sep = "\t" if path.name.lower().endswith((".tsv", ".tab", ".tsv.gz", ".tab.gz")) else ","
     try:
-        frame = pd.read_csv(path, sep=sep, encoding="utf-8-sig", low_memory=False)
+        if path.name.lower().endswith((".parquet", ".pq")):
+            frame = pd.read_parquet(path)
+        else:
+            frame = pd.read_csv(path, sep=sep, encoding="utf-8-sig", low_memory=False)
     except Exception as exc:
         raise EnvException(f"Cannot profile {file_name}: {type(exc).__name__}. No LLM fallback was attempted.") from exc
     result = {"file": file_name, "shape": list(frame.shape),
@@ -56,7 +59,10 @@ def profile_table(file_name, work_dir="."):
         if isinstance(value, float) and not np.isfinite(value):
             return None
         return value
-    return ("Computed profile of the complete file; no LLM calls. Numeric statistics exclude "
+    return ("Fixed, predetermined profile of the complete dataset; no LLM calls. "
+            "The things_to_look_for request does not customize this output and specific questions are not answered. "
+            "For specific knowledge about this dataset, write and execute a custom Python script. "
+            "Numeric statistics exclude "
             "missing/infinite values. Zero fractions use all rows. Top categorical values are limited to 10. "
             "This standard profile does not answer every custom question or establish seasonality. "
             "For plots, seasonality analysis, or additional checks, use Create Script (AI) then Execute Script.\n"
